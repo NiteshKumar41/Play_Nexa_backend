@@ -189,5 +189,11 @@ gameMatchSchema.index({ gameId: 1, status: 1, createdAt: -1 });
 gameMatchSchema.index({ player1: 1, createdAt: -1 });
 gameMatchSchema.index({ player2: 1, createdAt: -1 });
 gameMatchSchema.index({ status: 1, createdAt: 1 });
+gameMatchSchema.index({
+  status: 1,
+  winnerClaimStatus: 1,
+  completedAt: 1,
+  createdAt: 1,
+});
 
 module.exports = mongoose.model("GameMatch", gameMatchSchema);

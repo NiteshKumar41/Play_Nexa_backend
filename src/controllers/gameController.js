@@ -29,12 +29,30 @@ async function getGames(request, response, next) {
 
 async function getAdminGames(request, response, next) {
   try {
-    const games = await gameService.getAdminGames();
+    const data = await gameService.getAdminGames({
+      page: Number(request.query.page ?? 1),
+      limit: Number(request.query.limit ?? 20),
+    });
 
     return response.status(200).json({
       success: true,
-      data: { games },
+      data,
     });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function getGameImage(request, response, next) {
+  try {
+    const image = await gameService.getGameImage(
+      request.params.fileName,
+      request.user?.role === "admin"
+    );
+    response.set("Content-Type", image.contentType);
+    response.set("Cache-Control", "public, max-age=3600");
+    response.set("X-Content-Type-Options", "nosniff");
+    return response.send(image.buffer);
   } catch (error) {
     return next(error);
   }
@@ -129,6 +147,7 @@ module.exports = {
   createGame,
   getGames,
   getAdminGames,
+  getGameImage,
   getGameById,
   updateGame,
   toggleGameStatus,

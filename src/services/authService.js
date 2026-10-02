@@ -4,10 +4,30 @@ const User = require("../models/User");
 const walletService = require("./walletService");
 const { generateToken } = require("../utils/jwt");
 
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync("not-a-real-play-nexa-passcode", 10);
+const INVALID_LOGIN_MESSAGE = "Invalid phone number or passcode";
+
 function createAuthError(message, statusCode) {
   const error = new Error(message);
   error.statusCode = statusCode;
   return error;
+}
+
+function validateDateOfBirth(dob) {
+  if (dob === undefined || dob === null || dob === "") return;
+  if (typeof dob !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dob)) {
+    throw createAuthError("Date of birth must use YYYY-MM-DD format", 400);
+  }
+  const [year, month, day] = dob.split("-").map(Number);
+  const parsedDate = new Date(Date.UTC(year, month - 1, day));
+  if (
+    parsedDate.getUTCFullYear() !== year ||
+    parsedDate.getUTCMonth() !== month - 1 ||
+    parsedDate.getUTCDate() !== day ||
+    parsedDate.getTime() > Date.now()
+  ) {
+    throw createAuthError("Date of birth is invalid", 400);
+  }
 }
 
 function validateSignupDetails({ fullName, phone, password }) {
@@ -48,6 +68,18 @@ async function registerUser(userData) {
   if (!userData || typeof userData !== "object" || Array.isArray(userData)) {
     throw createAuthError("Invalid signup details", 400);
   }
+  const allowedFields = [
+    "fullName",
+    "phone",
+    "password",
+    "email",
+    "dob",
+    "gender",
+    "upiId",
+  ];
+  if (Object.keys(userData).some(field => !allowedFields.includes(field))) {
+    throw createAuthError("Signup request contains unsupported fields", 400);
+  }
 
   const {
     fullName,
@@ -60,6 +92,7 @@ async function registerUser(userData) {
   } = userData;
 
   validateSignupDetails({ fullName, phone, password });
+  validateDateOfBirth(dob);
 
   if (email !== undefined && email !== "" && typeof email !== "string") {
     throw createAuthError("Email must be a valid email address", 400);
@@ -138,27 +171,18 @@ async function loginUser(credentials) {
   }
 
   if (!/^[6-9]\d{9}$/.test(phone.trim()) || !/^\d{6}$/.test(password)) {
-    throw createAuthError("Invalid phone number or password", 401);
+    throw createAuthError(INVALID_LOGIN_MESSAGE, 401);
   }
 
   const user = await User.findOne({ phone: phone.trim() }).select("+password");
 
-  if (!user) {
-    throw createAuthError("Invalid phone number or password", 401);
-  }
+  const isPasswordCorrect = await bcrypt.compare(
+    password,
+    user?.password || DUMMY_PASSWORD_HASH
+  );
 
-  if (user.isBlocked) {
-    throw createAuthError("This account is blocked", 403);
-  }
-
-  if (!user.active) {
-    throw createAuthError("This account is inactive", 403);
-  }
-
-  const isPasswordCorrect = await bcrypt.compare(password, user.password);
-
-  if (!isPasswordCorrect) {
-    throw createAuthError("Invalid phone number or password", 401);
+  if (!user || !isPasswordCorrect || user.isBlocked || !user.active) {
+    throw createAuthError(INVALID_LOGIN_MESSAGE, 401);
   }
 
   return {

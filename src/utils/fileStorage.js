@@ -1,8 +1,18 @@
 const fs = require("fs/promises");
 const path = require("path");
 const { randomUUID } = require("crypto");
+const {
+  MAX_IMAGE_SIZE_BYTES,
+} = require("../config/upload");
 
 const uploadDirectory = path.resolve(process.cwd(), "uploads/game-results");
+const depositUploadDirectory = path.resolve(process.cwd(), "uploads/deposits");
+const paymentMethodUploadDirectory = path.resolve(
+  process.cwd(),
+  "uploads/payment-methods"
+);
+const supportUploadDirectory = path.resolve(process.cwd(), "uploads/support");
+const gameUploadDirectory = path.resolve(process.cwd(), "uploads/games");
 
 function getImageExtension(file) {
   const signatures = [
@@ -35,6 +45,16 @@ function getImageExtension(file) {
 }
 
 function validateImageFile(file) {
+  if (!Buffer.isBuffer(file?.buffer)) {
+    const error = new Error("Uploaded file must be an image");
+    error.statusCode = 415;
+    throw error;
+  }
+  if (file.buffer.length > MAX_IMAGE_SIZE_BYTES) {
+    const error = new Error("Uploaded image must be 5 MB or smaller");
+    error.statusCode = 413;
+    throw error;
+  }
   const extension = getImageExtension(file);
   const expectedExtensions = {
     "image/png": ".png",
@@ -44,7 +64,7 @@ function validateImageFile(file) {
 
   if (!extension || expectedExtensions[file.mimetype] !== extension) {
     const error = new Error("Uploaded file is not a valid PNG, JPG, or WEBP image");
-    error.statusCode = 400;
+    error.statusCode = 415;
     throw error;
   }
 
@@ -62,6 +82,52 @@ async function saveFile(file) {
   return fileName;
 }
 
+async function saveDepositProof(file) {
+  const extension = validateImageFile(file);
+  await fs.mkdir(depositUploadDirectory, { recursive: true });
+
+  const fileName = `deposit_${randomUUID()}${extension}`;
+  await fs.writeFile(path.join(depositUploadDirectory, fileName), file.buffer, {
+    flag: "wx",
+  });
+  return fileName;
+}
+
+async function savePaymentMethodQr(file) {
+  const extension = validateImageFile(file);
+  await fs.mkdir(paymentMethodUploadDirectory, { recursive: true });
+
+  const fileName = `payment_${randomUUID()}${extension}`;
+  await fs.writeFile(
+    path.join(paymentMethodUploadDirectory, fileName),
+    file.buffer,
+    { flag: "wx" }
+  );
+  return fileName;
+}
+
+async function saveSupportImage(file) {
+  const extension = validateImageFile(file);
+  await fs.mkdir(supportUploadDirectory, { recursive: true });
+
+  const fileName = `support_${randomUUID()}${extension}`;
+  await fs.writeFile(path.join(supportUploadDirectory, fileName), file.buffer, {
+    flag: "wx",
+  });
+  return fileName;
+}
+
+async function saveGameImage(file) {
+  const extension = validateImageFile(file);
+  await fs.mkdir(gameUploadDirectory, { recursive: true });
+
+  const fileName = `game_${randomUUID()}${extension}`;
+  await fs.writeFile(path.join(gameUploadDirectory, fileName), file.buffer, {
+    flag: "wx",
+  });
+  return fileName;
+}
+
 async function deleteFile(fileName) {
   if (!fileName || path.basename(fileName) !== fileName) return;
 
@@ -72,8 +138,34 @@ async function deleteFile(fileName) {
   }
 }
 
+async function deleteStoredFile(fileName, directory) {
+  if (!fileName || path.basename(fileName) !== fileName) return;
+
+  try {
+    await fs.unlink(path.join(directory, fileName));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+}
+
 function getFileUrl(matchId, fileName) {
   return `/api/v1/matches/${encodeURIComponent(matchId)}/result/evidence/${encodeURIComponent(fileName)}`;
+}
+
+function getDepositProofUrl(transactionId, fileName) {
+  return `/api/v1/wallet/deposits/${encodeURIComponent(transactionId)}/proof/${encodeURIComponent(fileName)}`;
+}
+
+function getPaymentMethodQrUrl(paymentMethodId, fileName) {
+  return `/api/v1/payment-methods/${encodeURIComponent(paymentMethodId)}/qr/${encodeURIComponent(fileName)}`;
+}
+
+function getSupportImageUrl(ticketId, fileName) {
+  return `/api/v1/support/tickets/${encodeURIComponent(ticketId)}/image/${encodeURIComponent(fileName)}`;
+}
+
+function getGameImageUrl(fileName) {
+  return `/api/v1/games/image/${encodeURIComponent(fileName)}`;
 }
 
 function getFileContentType(fileName) {
@@ -104,11 +196,52 @@ async function readFile(fileName) {
   }
 }
 
+async function readStoredFile(fileName, directory) {
+  if (!fileName || path.basename(fileName) !== fileName) {
+    const error = new Error("File not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  try {
+    return await fs.readFile(path.join(directory, fileName));
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      const notFoundError = new Error("File not found");
+      notFoundError.statusCode = 404;
+      throw notFoundError;
+    }
+    throw error;
+  }
+}
+
 module.exports = {
   saveFile,
+  saveDepositProof,
+  savePaymentMethodQr,
+  saveSupportImage,
+  saveGameImage,
   deleteFile,
+  deleteDepositProof: fileName =>
+    deleteStoredFile(fileName, depositUploadDirectory),
+  deletePaymentMethodQr: fileName =>
+    deleteStoredFile(fileName, paymentMethodUploadDirectory),
+  deleteSupportImage: fileName =>
+    deleteStoredFile(fileName, supportUploadDirectory),
+  deleteGameImage: fileName => deleteStoredFile(fileName, gameUploadDirectory),
   getFileUrl,
+  getDepositProofUrl,
+  getPaymentMethodQrUrl,
+  getSupportImageUrl,
+  getGameImageUrl,
   getFileContentType,
   readFile,
+  readDepositProof: fileName =>
+    readStoredFile(fileName, depositUploadDirectory),
+  readPaymentMethodQr: fileName =>
+    readStoredFile(fileName, paymentMethodUploadDirectory),
+  readSupportImage: fileName =>
+    readStoredFile(fileName, supportUploadDirectory),
+  readGameImage: fileName => readStoredFile(fileName, gameUploadDirectory),
   validateImageFile,
 };

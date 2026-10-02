@@ -1,21 +1,33 @@
 const multer = require("multer");
+const path = require("path");
+const {
+  MAX_IMAGE_SIZE_BYTES,
+  ALLOWED_IMAGE_MIME_TYPES,
+  ALLOWED_IMAGE_EXTENSIONS,
+} = require("../config/upload");
 
-const allowedMimeTypes = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/webp",
-]);
-
-const uploadScreenshot = multer({
+const uploadImage = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 5 * 1024 * 1024,
+    fileSize: MAX_IMAGE_SIZE_BYTES,
     files: 1,
   },
   fileFilter(request, file, callback) {
-    if (!allowedMimeTypes.has(file.mimetype)) {
-      const error = new Error("Screenshot must be PNG, JPG, JPEG, or WEBP");
-      error.statusCode = 400;
+    const extension = path.extname(file.originalname).toLowerCase();
+    const mimeTypeMatchesExtension =
+      file.mimetype === "image/jpeg"
+        ? [".jpg", ".jpeg"].includes(extension)
+        : file.mimetype === "image/png"
+          ? extension === ".png"
+          : file.mimetype === "image/webp" && extension === ".webp";
+
+    if (
+      !ALLOWED_IMAGE_MIME_TYPES.has(file.mimetype) ||
+      !ALLOWED_IMAGE_EXTENSIONS.has(extension) ||
+      !mimeTypeMatchesExtension
+    ) {
+      const error = new Error("File must be a JPG, JPEG, PNG, or WEBP image");
+      error.statusCode = 415;
       return callback(error);
     }
 
@@ -23,4 +35,4 @@ const uploadScreenshot = multer({
   },
 });
 
-module.exports = uploadScreenshot;
+module.exports = uploadImage;

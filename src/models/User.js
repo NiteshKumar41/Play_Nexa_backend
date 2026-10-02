@@ -38,6 +38,16 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: "player",
     },
+    adminUpdatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    adminSafetyVersion: {
+      type: Number,
+      default: 0,
+      select: false,
+    },
     active: {
       type: Boolean,
       default: true,
@@ -57,5 +67,7 @@ const userSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+userSchema.index({ role: 1, active: 1, isBlocked: 1 });
 
 module.exports = mongoose.model("User", userSchema);

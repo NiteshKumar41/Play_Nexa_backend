@@ -116,7 +116,7 @@ async function updateWalletBalance({
       throw createWalletError("Wallet not found", 404);
     }
 
-    const balanceBefore = wallet.balance;
+    const balanceBefore = roundMoney(wallet.balance);
     const newBalance = isCredit
       ? addMoney(balanceBefore, normalizedAmount)
       : subtractMoney(balanceBefore, normalizedAmount);

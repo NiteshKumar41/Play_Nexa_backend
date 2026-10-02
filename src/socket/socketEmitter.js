@@ -1,6 +1,10 @@
 const { getSocketServer } = require("./socketManager");
 const { SOCKET_EVENTS } = require("./socketEvents");
 
+function disconnectUserSockets(userId) {
+  getSocketServer().in(`user:${userId}`).disconnectSockets(true);
+}
+
 function emitMatchCreated(match) {
   getSocketServer()
     .to(`game:lobby:${match.gameId}`)
@@ -94,7 +98,104 @@ function emitDisputeSubmitted(match) {
   io.to(`match:${match.id}`).emit(SOCKET_EVENTS.MATCH_RESULT_UPDATED, payload);
 }
 
+function emitMatchSettled(settlement) {
+  getSocketServer()
+    .to(`match:${settlement.matchId}`)
+    .emit(SOCKET_EVENTS.MATCH_SETTLED, {
+      matchId: settlement.matchId,
+      status: settlement.status,
+      winnerUserId: settlement.winnerUserId,
+      winnerAmount: settlement.winnerAmount,
+    });
+}
+
+function emitMatchRefunded(settlement) {
+  getSocketServer()
+    .to(`match:${settlement.matchId}`)
+    .emit(SOCKET_EVENTS.MATCH_REFUNDED, {
+      matchId: settlement.matchId,
+      status: settlement.status,
+    });
+}
+
+function emitMatchClaimRejected(settlement) {
+  getSocketServer()
+    .to(`match:${settlement.matchId}`)
+    .emit(SOCKET_EVENTS.MATCH_CLAIM_REJECTED, {
+      matchId: settlement.matchId,
+      status: settlement.status,
+    });
+}
+
+function emitDepositApproved(deposit) {
+  getSocketServer()
+    .to(`user:${deposit.userId}`)
+    .emit(SOCKET_EVENTS.DEPOSIT_APPROVED, {
+      transactionId: deposit.transactionId,
+      amount: deposit.amount,
+      status: deposit.status,
+    });
+}
+
+function emitDepositRejected(deposit) {
+  getSocketServer()
+    .to(`user:${deposit.userId}`)
+    .emit(SOCKET_EVENTS.DEPOSIT_REJECTED, {
+      transactionId: deposit.transactionId,
+      amount: deposit.amount,
+      status: deposit.status,
+    });
+}
+
+function emitWithdrawalSuccess(withdrawal) {
+  getSocketServer()
+    .to(`user:${withdrawal.userId}`)
+    .emit(SOCKET_EVENTS.WITHDRAWAL_SUCCESS, {
+      transactionId: withdrawal.transactionId,
+      amount: withdrawal.amount,
+      status: withdrawal.status,
+    });
+}
+
+function emitWithdrawalFailed(withdrawal) {
+  getSocketServer()
+    .to(`user:${withdrawal.userId}`)
+    .emit(SOCKET_EVENTS.WITHDRAWAL_FAILED, {
+      transactionId: withdrawal.transactionId,
+      amount: withdrawal.amount,
+      status: withdrawal.status,
+    });
+}
+
+function emitSupportTicketCreated(ticket) {
+  getSocketServer()
+    .to("admins")
+    .emit(SOCKET_EVENTS.SUPPORT_TICKET_CREATED, {
+      ticketId: ticket.ticketId,
+      status: ticket.status,
+    });
+}
+
+function emitSupportTicketUpdated(ticket) {
+  getSocketServer()
+    .to(`user:${ticket.userId}`)
+    .emit(SOCKET_EVENTS.SUPPORT_TICKET_UPDATED, {
+      ticketId: ticket.ticketId,
+      status: ticket.status,
+    });
+}
+
+function emitSupportTicketResolved(ticket) {
+  getSocketServer()
+    .to(`user:${ticket.userId}`)
+    .emit(SOCKET_EVENTS.SUPPORT_TICKET_RESOLVED, {
+      ticketId: ticket.ticketId,
+      status: ticket.status,
+    });
+}
+
 module.exports = {
+  disconnectUserSockets,
   emitMatchCreated,
   emitMatchJoined,
   emitMatchPlayerLeft,
@@ -102,4 +203,14 @@ module.exports = {
   emitRoomCodeUpdated,
   emitResultSubmitted,
   emitDisputeSubmitted,
+  emitMatchSettled,
+  emitMatchRefunded,
+  emitMatchClaimRejected,
+  emitDepositApproved,
+  emitDepositRejected,
+  emitWithdrawalSuccess,
+  emitWithdrawalFailed,
+  emitSupportTicketCreated,
+  emitSupportTicketUpdated,
+  emitSupportTicketResolved,
 };

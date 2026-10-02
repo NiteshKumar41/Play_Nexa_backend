@@ -213,24 +213,49 @@ async function getResultByMatchId(matchId, userId, role) {
   return formatResult(match, game);
 }
 
-async function getPendingResults() {
-  const matches = await GameMatch.find({
+async function getPendingResults(query = {}) {
+  const page = Number(query.page ?? 1);
+  const limit = Number(query.limit ?? 20);
+  if (
+    !Number.isSafeInteger(page) ||
+    page < 1 ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 100
+  ) {
+    throw createResultError("Page must be positive and limit must be 1-100", 400);
+  }
+  const filter = {
     status: { $in: [MATCH_STATUS.COMPLETED, MATCH_STATUS.DISPUTED] },
-  })
-    .sort({ createdAt: -1, _id: -1 })
-    .populate("gameId", "_id gameCode name")
-    .lean();
+  };
+  const [matches, total] = await Promise.all([
+    GameMatch.find(filter)
+      .sort({ createdAt: -1, _id: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .populate("gameId", "_id gameCode name")
+      .lean(),
+    GameMatch.countDocuments(filter),
+  ]);
 
-  return matches.map(match =>
-    formatResult(
-      {
-        ...match,
-        _id: match._id,
-        gameId: match.gameId?._id || match.gameId,
-      },
-      match.gameId
-    )
-  );
+  return {
+    matches: matches.map(match =>
+      formatResult(
+        {
+          ...match,
+          _id: match._id,
+          gameId: match.gameId?._id || match.gameId,
+        },
+        match.gameId
+      )
+    ),
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: total === 0 ? 0 : Math.ceil(total / limit),
+    },
+  };
 }
 
 async function getEvidenceFile(matchId, fileName, userId, role) {

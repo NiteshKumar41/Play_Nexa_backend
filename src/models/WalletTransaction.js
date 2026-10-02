@@ -18,6 +18,36 @@ const walletTransactionSchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+    upiId: {
+      type: String,
+      trim: true,
+    },
+    upiApp: {
+      type: String,
+      trim: true,
+      maxlength: 100,
+    },
+    upiTransactionId: {
+      type: String,
+      trim: true,
+      maxlength: 200,
+    },
+    clientRequestId: {
+      type: String,
+      trim: true,
+      maxlength: 128,
+    },
+    proofUrl: {
+      type: String,
+      trim: true,
+    },
+    processedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    processedAt: {
+      type: Date,
+    },
     transactionType: {
       type: String,
       enum: Object.values(TRANSACTION_TYPE),
@@ -63,6 +93,33 @@ const walletTransactionSchema = new mongoose.Schema(
 
 walletTransactionSchema.index({ walletId: 1, createdAt: -1 });
 walletTransactionSchema.index({ userId: 1, createdAt: -1 });
+walletTransactionSchema.index({ transactionType: 1, status: 1, createdAt: 1 });
+walletTransactionSchema.index({
+  userId: 1,
+  transactionType: 1,
+  status: 1,
+  createdAt: -1,
+});
+walletTransactionSchema.index(
+  { userId: 1, transactionType: 1, clientRequestId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      transactionType: "WITHDRAW",
+      clientRequestId: { $type: "string" },
+    },
+  }
+);
+walletTransactionSchema.index(
+  { userId: 1, transactionType: 1, upiTransactionId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      transactionType: "ADD_MONEY",
+      upiTransactionId: { $type: "string" },
+    },
+  }
+);
 walletTransactionSchema.index({ referenceType: 1, referenceId: 1 });
 walletTransactionSchema.index(
   { transactionType: 1, referenceType: 1, referenceId: 1 },

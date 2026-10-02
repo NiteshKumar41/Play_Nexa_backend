@@ -15,6 +15,11 @@ function optionalAuthMiddleware(request, response, next) {
 
 router.get("/", gameController.getGames);
 router.get(
+  "/image/:fileName",
+  optionalAuthMiddleware,
+  gameController.getGameImage
+);
+router.get(
   "/admin",
   authMiddleware,
   adminMiddleware,

@@ -13,6 +13,8 @@ function formatSubmissionMatch(match, includeWinner) {
 
   if (includeWinner) {
     formattedMatch.winnerClaimedBy = match.winnerClaimedBy;
+  } else {
+    formattedMatch.disputeClaimedBy = match.disputeClaimedBy;
   }
 
   return formattedMatch;
@@ -66,10 +68,10 @@ async function submitDispute(request, response, next) {
 
 async function getPendingResults(request, response, next) {
   try {
-    const matches = await resultService.getPendingResults();
+    const data = await resultService.getPendingResults(request.query);
     return response.status(200).json({
       success: true,
-      data: { matches },
+      data,
     });
   } catch (error) {
     return next(error);

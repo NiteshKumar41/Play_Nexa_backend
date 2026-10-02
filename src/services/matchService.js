@@ -29,7 +29,11 @@ function validateEntryFee(entryFee) {
   }
 }
 
-function formatMatch(match, game, includeEvidence = false) {
+function formatMatch(
+  match,
+  game,
+  { includeEvidence = false, includeRoomCode = false } = {}
+) {
   const formattedMatch = {
     id: match._id.toString(),
     gameId: match.gameId.toString(),
@@ -48,7 +52,7 @@ function formatMatch(match, game, includeEvidence = false) {
     player2: match.player2?.toString() || null,
     player2Name: match.player2Name,
     player2Amount: match.player2Amount,
-    roomCode: match.roomCode,
+    roomCode: includeRoomCode ? match.roomCode : undefined,
     status: match.status,
     prizePool: match.prizePool,
     platformFee: match.platformFee,
@@ -246,7 +250,11 @@ async function getMatchById(matchId, userId, role) {
   const isParticipant =
     match.player1.toString() === userId ||
     match.player2?.toString() === userId;
-  return formatMatch(match, game, role === "admin" || isParticipant);
+  const canViewPrivateDetails = role === "admin" || isParticipant;
+  return formatMatch(match, game, {
+    includeEvidence: canViewPrivateDetails,
+    includeRoomCode: canViewPrivateDetails,
+  });
 }
 
 async function joinMatch(matchId, userId) {
@@ -386,7 +394,7 @@ async function setRoomCode(matchId, userId, roomCode) {
     "_id gameCode name imageUrl"
   );
 
-  return formatMatch(updatedMatch, game);
+  return formatMatch(updatedMatch, game, { includeRoomCode: true });
 }
 
 async function leaveMatch(matchId, userId) {

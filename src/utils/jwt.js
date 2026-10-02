@@ -14,17 +14,17 @@ function generateToken(user) {
   return jwt.sign(
     {
       id: user._id.toString(),
-      role: user.role,
     },
     getJwtSecret(),
     {
-      expiresIn: process.env.JWT_EXPIRES_IN || "30d",
+      expiresIn: process.env.JWT_EXPIRES_IN,
+      algorithm: "HS256",
     }
   );
 }
 
 function verifyToken(token) {
-  return jwt.verify(token, getJwtSecret());
+  return jwt.verify(token, getJwtSecret(), { algorithms: ["HS256"] });
 }
 
 module.exports = {

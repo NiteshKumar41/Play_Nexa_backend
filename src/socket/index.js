@@ -13,6 +13,10 @@ function initializeSocket(io) {
 
   io.on("connection", socket => {
     console.log(`Socket connected: ${socket.user.id}`);
+    socket.join(`user:${socket.user.id}`);
+    if (socket.user.role === "admin") {
+      socket.join("admins");
+    }
 
     socket.on("join_game_lobby", async payload => {
       const gameId = payload?.gameId;

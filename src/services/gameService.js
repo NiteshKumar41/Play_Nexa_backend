@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const Game = require("../models/Game");
+const fileStorage = require("../utils/fileStorage");
 
 const GAME_NAME_COLLATION = { locale: "en", strength: 2 };
 const GAME_FIELDS = "gameCode name imageUrl isActive isOpen";
@@ -59,6 +60,10 @@ function validateImageUrl(imageUrl) {
 
   if (typeof imageUrl !== "string") {
     throw createGameError("Image URL must be a valid HTTP or HTTPS URL", 400);
+  }
+
+  if (/^\/api\/v1\/games\/image\/game_[\w-]+\.(png|jpg|webp)$/i.test(imageUrl)) {
+    return;
   }
 
   try {
@@ -142,11 +147,25 @@ async function createGame(gameDetails, adminUserId) {
     "gameCode",
     "name",
     "imageUrl",
+    "isActive",
+    "isOpen",
   ]);
 
   validateGameCode(gameCode);
   validateGameName(name);
   validateImageUrl(imageUrl);
+  if (
+    gameDetails.isActive !== undefined &&
+    typeof gameDetails.isActive !== "boolean"
+  ) {
+    throw createGameError("isActive must be a boolean", 400);
+  }
+  if (
+    gameDetails.isOpen !== undefined &&
+    typeof gameDetails.isOpen !== "boolean"
+  ) {
+    throw createGameError("isOpen must be a boolean", 400);
+  }
 
   const normalizedName = name.trim();
   const existingGame = await findDuplicateGame({
@@ -167,6 +186,8 @@ async function createGame(gameDetails, adminUserId) {
       gameCode,
       name: normalizedName,
       imageUrl: imageUrl || undefined,
+      isActive: gameDetails.isActive ?? true,
+      isOpen: gameDetails.isOpen ?? false,
       createdBy: adminUserId,
     });
 
@@ -188,11 +209,33 @@ async function getGames() {
   return games.map(game => formatGame(game));
 }
 
-async function getAdminGames() {
-  const games = await Game.find({})
-    .sort({ createdAt: -1, _id: -1 });
+async function getAdminGames({ page = 1, limit = 20 } = {}) {
+  if (
+    !Number.isSafeInteger(page) ||
+    page < 1 ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 100
+  ) {
+    throw createGameError("Page must be positive and limit must be 1-100", 400);
+  }
+  const [games, total] = await Promise.all([
+    Game.find({})
+      .sort({ createdAt: -1, _id: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit),
+    Game.countDocuments({}),
+  ]);
 
-  return games.map(game => formatGame(game, true));
+  return {
+    games: games.map(game => formatGame(game, true)),
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: total === 0 ? 0 : Math.ceil(total / limit),
+    },
+  };
 }
 
 async function getGameById(gameId, isAdmin = false) {
@@ -213,6 +256,25 @@ async function getGameById(gameId, isAdmin = false) {
   return formatGame(game, isAdmin);
 }
 
+async function getGameImage(fileName, isAdmin = false) {
+  if (
+    typeof fileName !== "string" ||
+    !/^game_[\w-]+\.(png|jpg|webp)$/i.test(fileName)
+  ) {
+    throw createGameError("Game image not found", 404);
+  }
+  const imageUrl = fileStorage.getGameImageUrl(fileName);
+  const query = { imageUrl };
+  if (!isAdmin) query.isActive = true;
+
+  const game = await Game.findOne(query).select("_id").lean();
+  if (!game) throw createGameError("Game image not found", 404);
+  return {
+    buffer: await fileStorage.readGameImage(fileName),
+    contentType: fileStorage.getFileContentType(fileName),
+  };
+}
+
 async function updateGame(gameId, gameDetails, adminUserId) {
   validateGameId(gameId);
 
@@ -220,7 +282,13 @@ async function updateGame(gameId, gameDetails, adminUserId) {
     throw createGameError("Invalid admin user", 400);
   }
 
-  const updates = getGameFields(gameDetails, ["gameCode", "name", "imageUrl"]);
+  const updates = getGameFields(gameDetails, [
+    "gameCode",
+    "name",
+    "imageUrl",
+    "isActive",
+    "isOpen",
+  ]);
 
   if (Object.keys(updates).length === 0) {
     throw createGameError("At least one game field must be provided", 400);
@@ -238,6 +306,14 @@ async function updateGame(gameId, gameDetails, adminUserId) {
   if (Object.hasOwn(updates, "imageUrl")) {
     validateImageUrl(updates.imageUrl);
     updates.imageUrl = updates.imageUrl || undefined;
+  }
+  for (const fieldName of ["isActive", "isOpen"]) {
+    if (
+      Object.hasOwn(updates, fieldName) &&
+      typeof updates[fieldName] !== "boolean"
+    ) {
+      throw createGameError(`${fieldName} must be a boolean`, 400);
+    }
   }
 
   const existingGame = await findDuplicateGame({
@@ -360,6 +436,7 @@ module.exports = {
   getGames,
   getAdminGames,
   getGameById,
+  getGameImage,
   updateGame,
   toggleGameStatus,
   toggleGameOpenStatus,

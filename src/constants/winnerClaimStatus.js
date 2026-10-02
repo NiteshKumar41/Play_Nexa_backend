@@ -1,0 +1,7 @@
+const WINNER_CLAIM_STATUS = {
+  PENDING: "PENDING",
+  APPROVED: "APPROVED",
+  REJECTED: "REJECTED",
+};
+
+module.exports = { WINNER_CLAIM_STATUS };

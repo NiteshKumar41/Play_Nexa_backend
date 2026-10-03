@@ -12,6 +12,7 @@ const router = express.Router();
 router.use(authMiddleware);
 router.get("/", walletController.getWallet);
 router.get("/transactions", walletController.getTransactions);
+router.post("/deposits/verify", financialWriteRateLimiter, depositController.verifyRazorpayPayment);
 router.post(
   "/deposits",
   financialWriteRateLimiter,

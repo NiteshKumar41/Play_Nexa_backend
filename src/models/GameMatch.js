@@ -83,6 +83,10 @@ const gameMatchSchema = new mongoose.Schema(
       default: MATCH_STATUS.ACTIVE,
       required: true,
     },
+    joinDeadline: {
+      type: Date,
+      default: undefined,
+    },
     winnerClaimedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -114,6 +118,11 @@ const gameMatchSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    winnerTransactionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "WalletTransaction",
+      default: null,
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -122,6 +131,13 @@ const gameMatchSchema = new mongoose.Schema(
     createdName: {
       type: String,
       required: true,
+    },
+    // A client-generated key makes repeated create requests safe to retry.
+    clientRequestId: {
+      type: String,
+      trim: true,
+      maxlength: 128,
+      default: null,
     },
     disputeReason: {
       type: String,
@@ -187,6 +203,13 @@ const gameMatchSchema = new mongoose.Schema(
 
 gameMatchSchema.index({ gameId: 1, status: 1, createdAt: -1 });
 gameMatchSchema.index({ player1: 1, createdAt: -1 });
+gameMatchSchema.index(
+  { player1: 1, clientRequestId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { clientRequestId: { $type: "string" } },
+  }
+);
 gameMatchSchema.index({ player2: 1, createdAt: -1 });
 gameMatchSchema.index({ status: 1, createdAt: 1 });
 gameMatchSchema.index({

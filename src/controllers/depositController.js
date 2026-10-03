@@ -22,6 +22,22 @@ async function createDeposit(request, response, next) {
   }
 }
 
+async function verifyRazorpayPayment(request, response, next) {
+  try {
+    const fields = ["razorpay_order_id", "razorpay_payment_id", "razorpay_signature"];
+    if (!request.body || typeof request.body !== "object" || Array.isArray(request.body) ||
+        Object.keys(request.body).length !== fields.length || fields.some(field => typeof request.body[field] !== "string" || !request.body[field].trim())) {
+      const error = new Error("Only Razorpay order, payment, and signature identifiers are required");
+      error.statusCode = 400;
+      throw error;
+    }
+    const data = await depositService.verifyRazorpayDeposit(request.user.id, request.body);
+    return response.status(200).json({ success: true, data });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 async function getUserDeposits(request, response, next) {
   try {
     const data = await depositService.getUserDeposits(
@@ -51,4 +67,4 @@ async function getDepositProof(request, response, next) {
   }
 }
 
-module.exports = { createDeposit, getUserDeposits, getDepositProof };
+module.exports = { createDeposit, verifyRazorpayPayment, getUserDeposits, getDepositProof };

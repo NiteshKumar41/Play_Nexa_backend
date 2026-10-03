@@ -9,7 +9,6 @@ const { Server } = require("socket.io");
 const initializeSocket = require("./socket");
 const { setSocketServer } = require("./socket/socketManager");
 const { getAllowedOrigins } = require("./config/cors");
-
 const port = process.env.PORT || 5000;
 const configuredOrigins = [...getAllowedOrigins()];
 

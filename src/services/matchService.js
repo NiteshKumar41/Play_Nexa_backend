@@ -1,11 +1,14 @@
 const mongoose = require("mongoose");
 const Game = require("../models/Game");
 const GameMatch = require("../models/GameMatch");
+const WalletTransaction = require("../models/WalletTransaction");
 const User = require("../models/User");
 const { MATCH_STATUS } = require("../constants/matchStatus");
 const { TRANSACTION_TYPE } = require("../constants/transactionTypes");
+const { TRANSACTION_STATUS } = require("../constants/transactionStatus");
 const walletService = require("./walletService");
 const { calculateMatchFinancials } = require("../utils/matchFinancials");
+const { addMoney, roundMoney } = require("../utils/money");
 
 function createMatchError(message, statusCode) {
   const error = new Error(message);
@@ -27,6 +30,30 @@ function validateEntryFee(entryFee) {
   ) {
     throw createMatchError("Entry fee must be a number greater than 0", 400);
   }
+}
+
+function validateClientRequestId(clientRequestId) {
+  if (clientRequestId === undefined || clientRequestId === null || clientRequestId === "") {
+    return null;
+  }
+
+  if (
+    typeof clientRequestId !== "string" ||
+    clientRequestId.trim().length < 1 ||
+    clientRequestId.trim().length > 128
+  ) {
+    throw createMatchError("Invalid client request ID", 400);
+  }
+
+  return clientRequestId.trim();
+}
+
+function isSameCreateRequest(match, { gameId, entryFee, userId }) {
+  return (
+    match.player1.toString() === userId.toString() &&
+    match.gameId.toString() === gameId.toString() &&
+    Number(match.player1Amount) === Number(entryFee)
+  );
 }
 
 function formatMatch(
@@ -103,13 +130,33 @@ function getRequestFields(requestData, allowedFields) {
 }
 
 async function createMatch(matchData, userId) {
-  const { gameId, entryFee } = getRequestFields(matchData, [
+  const { gameId, entryFee, clientRequestId: rawClientRequestId } = getRequestFields(matchData, [
     "gameId",
     "entryFee",
+    "clientRequestId",
   ]);
   validateObjectId(userId, "user");
   validateObjectId(gameId, "game ID");
   validateEntryFee(entryFee);
+  const clientRequestId = validateClientRequestId(rawClientRequestId);
+
+  if (clientRequestId) {
+    const existingMatch = await GameMatch.findOne({
+      player1: userId,
+      clientRequestId,
+    });
+
+    if (existingMatch) {
+      if (!isSameCreateRequest(existingMatch, { gameId, entryFee, userId })) {
+        throw createMatchError(
+          "This client request ID was already used for a different match",
+          409
+        );
+      }
+
+      return formatMatch(existingMatch);
+    }
+  }
 
   const session = await mongoose.startSession();
   let createdMatch;
@@ -175,6 +222,7 @@ async function createMatch(matchData, userId) {
             winnerAmount: 0,
             createdBy: user._id,
             createdName: user.fullName,
+            clientRequestId,
           },
         ],
         { session }
@@ -182,6 +230,26 @@ async function createMatch(matchData, userId) {
     });
 
     return formatMatch(createdMatch);
+  } catch (error) {
+    if (error?.code === 11000 && clientRequestId) {
+      const existingMatch = await GameMatch.findOne({
+        player1: userId,
+        clientRequestId,
+      });
+
+      if (existingMatch) {
+        if (!isSameCreateRequest(existingMatch, { gameId, entryFee, userId })) {
+          throw createMatchError(
+            "This client request ID was already used for a different match",
+            409
+          );
+        }
+
+        return formatMatch(existingMatch);
+      }
+    }
+
+    throw error;
   } finally {
     await session.endSession();
   }
@@ -251,6 +319,11 @@ async function getMatchById(matchId, userId, role) {
     match.player1.toString() === userId ||
     match.player2?.toString() === userId;
   const canViewPrivateDetails = role === "admin" || isParticipant;
+
+  if (!canViewPrivateDetails) {
+    throw createMatchError("You are not allowed to view this match", 403);
+  }
+
   return formatMatch(match, game, {
     includeEvidence: canViewPrivateDetails,
     includeRoomCode: canViewPrivateDetails,
@@ -280,6 +353,10 @@ async function joinMatch(matchId, userId) {
         throw createMatchError("Match is no longer available", 409);
       }
 
+      if (match.joinDeadline && new Date() >= match.joinDeadline) {
+        throw createMatchError("Match joining deadline has passed", 409);
+      }
+
       const user = await User.findById(userId)
         .select("_id fullName phone active isBlocked")
         .session(session);
@@ -299,10 +376,11 @@ async function joinMatch(matchId, userId) {
       const game = await Game.findOne({
         _id: match.gameId,
         isActive: true,
+        isOpen: true,
       }).session(session);
 
       if (!game) {
-        throw createMatchError("This game is no longer active", 400);
+        throw createMatchError("This game is not open for matchmaking", 400);
       }
 
       const walletChange = await walletService.debitWallet({
@@ -362,6 +440,12 @@ async function setRoomCode(matchId, userId, roomCode) {
     throw createMatchError("Room code is required", 400);
   }
 
+  const normalizedRoomCode = roomCode.trim();
+
+  if (normalizedRoomCode.length > 64) {
+    throw createMatchError("Room code must be 64 characters or fewer", 400);
+  }
+
   const match = await GameMatch.findById(matchId);
 
   if (!match) {
@@ -382,7 +466,7 @@ async function setRoomCode(matchId, userId, roomCode) {
       player1: userId,
       status: MATCH_STATUS.JOINED,
     },
-    { $set: { roomCode: roomCode.trim() } },
+    { $set: { roomCode: normalizedRoomCode } },
     { new: true, runValidators: true }
   );
 
@@ -501,19 +585,66 @@ async function cancelMatch(matchId, userId) {
         );
       }
 
+      const matchReferenceId = match._id.toString();
+      const eligiblePlayerId = match.player1.toString();
+      const originalEntryFee = roundMoney(match.player1Amount);
+      const successfulGameWin = await WalletTransaction.findOne({
+        userId: eligiblePlayerId,
+        transactionType: TRANSACTION_TYPE.GAME_WIN,
+        referenceId: matchReferenceId,
+        status: TRANSACTION_STATUS.SUCCESS,
+      })
+        .select("_id")
+        .session(session);
+
+      if (successfulGameWin) {
+        throw createMatchError(
+          "A successful game settlement already exists for this match",
+          409
+        );
+      }
+
+      const successfulRefunds = await WalletTransaction.find({
+        userId: eligiblePlayerId,
+        transactionType: TRANSACTION_TYPE.GAME_REFUND,
+        referenceId: matchReferenceId,
+        status: TRANSACTION_STATUS.SUCCESS,
+      })
+        .select("amount")
+        .session(session);
+      const totalSuccessfulRefundAmount = successfulRefunds.reduce(
+        (total, refund) => addMoney(total, roundMoney(refund.amount)),
+        0
+      );
+
+      if (successfulRefunds.length > 0) {
+        throw createMatchError("A refund already exists for this match", 409);
+      }
+
+      const refundAmount = originalEntryFee;
+      if (
+        addMoney(totalSuccessfulRefundAmount, refundAmount) > originalEntryFee
+      ) {
+        throw createMatchError(
+          "The match refund exceeds the original entry fee",
+          409
+        );
+      }
+
       await walletService.creditWallet({
-        userId,
-        amount: match.player1Amount,
+        userId: eligiblePlayerId,
+        amount: refundAmount,
         transactionType: TRANSACTION_TYPE.GAME_REFUND,
         remarks: "Cancelled match entry refund",
-        referenceId: match._id.toString(),
+        referenceId: matchReferenceId,
+        referenceType: "MATCH_REFUND",
         session,
       });
 
       cancelledMatch = await GameMatch.findOneAndUpdate(
         {
           _id: match._id,
-          player1: userId,
+          player1: match.player1,
           status: MATCH_STATUS.ACTIVE,
           player2: null,
           roomCode: "",

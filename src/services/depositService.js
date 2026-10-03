@@ -5,9 +5,12 @@ const Wallet = require("../models/Wallet");
 const WalletTransaction = require("../models/WalletTransaction");
 const { TRANSACTION_STATUS } = require("../constants/transactionStatus");
 const { TRANSACTION_TYPE } = require("../constants/transactionTypes");
-const { addMoney, roundMoney } = require("../utils/money");
+const { roundMoney } = require("../utils/money");
 const dateUtils = require("../utils/date");
 const fileStorage = require("../utils/fileStorage");
+const paymentService = require("./paymentService");
+const walletService = require("./walletService");
+const { rupeesToPaise } = require("./paymentProviders/RazorpayProvider");
 
 const DEPOSIT_STATUSES = [
   TRANSACTION_STATUS.PENDING,
@@ -82,6 +85,30 @@ function validateOptionalText(value, fieldName, maxLength) {
   return value.trim() || undefined;
 }
 
+function validateClientRequestId(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (
+    typeof value !== "string" ||
+    value.trim().length < 1 ||
+    value.trim().length > 128
+  ) {
+    throw createDepositError(
+      "clientRequestId must be between 1 and 128 characters",
+      400
+    );
+  }
+  return value.trim();
+}
+
+async function findExistingDeposit(userId, clientRequestId) {
+  if (!clientRequestId) return null;
+  return WalletTransaction.findOne({
+    userId,
+    transactionType: TRANSACTION_TYPE.ADD_MONEY,
+    clientRequestId,
+  });
+}
+
 function getDateFilters(query) {
   const fromDate = query.fromDate ?? query.from;
   const toDate = query.toDate ?? query.to;
@@ -119,16 +146,35 @@ function formatDeposit(transaction, user = null) {
 }
 
 async function createDeposit(userId, depositData, proofFile) {
+  // Deposit records are still created through the manual UPI proof flow.
+  // Provider driven order/verification belongs behind paymentService when a
+  // provider-backed deposit flow is introduced; approval remains the sole
+  // wallet-credit path.
   validateObjectId(userId, "user");
-  if (!proofFile) throw createDepositError("Payment proof is required", 400);
+  if (!depositData || typeof depositData !== "object" || Array.isArray(depositData)) {
+    throw createDepositError("Deposit details are required", 400);
+  }
 
   const amount = validateAmount(depositData?.amount);
+  const clientRequestId = validateClientRequestId(depositData?.clientRequestId);
   const upiApp = validateOptionalText(depositData?.upiApp, "UPI app", 100);
   const upiTransactionId = validateOptionalText(
     depositData?.upiTransactionId,
     "UPI transaction ID",
     200
   );
+
+  const priorDeposit = await findExistingDeposit(userId, clientRequestId);
+  if (priorDeposit) {
+    if (priorDeposit.amount !== amount) {
+      throw createDepositError(
+        "clientRequestId was already used for a different deposit",
+        409
+      );
+    }
+    return formatDeposit(priorDeposit);
+  }
+  if (!proofFile) throw createDepositError("Payment proof is required", 400);
 
   const paymentMethod = await PaymentMethod.findOne({ status: true }).select(
     "_id upiId"
@@ -163,6 +209,7 @@ async function createDeposit(userId, depositData, proofFile) {
         upiId: paymentMethod.upiId,
         upiApp,
         upiTransactionId,
+        clientRequestId,
         proofUrl: fileStorage.getDepositProofUrl(
           transactionId,
           proofFileName
@@ -175,9 +222,88 @@ async function createDeposit(userId, depositData, proofFile) {
   } catch (error) {
     if (proofFileName) await fileStorage.deleteDepositProof(proofFileName);
     if (error.code === 11000) {
+      const duplicateRequest = await findExistingDeposit(userId, clientRequestId);
+      if (duplicateRequest) {
+        if (duplicateRequest.amount !== amount) {
+          throw createDepositError(
+            "clientRequestId was already used for a different deposit",
+            409
+          );
+        }
+        return formatDeposit(duplicateRequest);
+      }
       throw createDepositError("Payment transaction already submitted", 409);
     }
     throw error;
+  }
+}
+
+function createPaymentOrder(transaction, idempotencyKey) {
+  return paymentService.createOrder({ transaction, idempotencyKey });
+}
+
+async function verifyRazorpayDeposit(userId, paymentData) {
+  validateObjectId(userId, "user");
+  const requiredFields = ["razorpay_order_id", "razorpay_payment_id", "razorpay_signature"];
+  if (
+    !paymentData || typeof paymentData !== "object" || Array.isArray(paymentData) ||
+    requiredFields.some(field => typeof paymentData[field] !== "string" || !paymentData[field].trim())
+  ) {
+    throw createDepositError("Razorpay order, payment, and signature identifiers are required", 400);
+  }
+  const { razorpay_order_id: orderId, razorpay_payment_id: paymentId, razorpay_signature: signature } = paymentData;
+  const deposit = await WalletTransaction.findOne({
+    gatewayOrderId: orderId,
+    userId,
+    transactionType: TRANSACTION_TYPE.ADD_MONEY,
+  });
+  if (!deposit) throw createDepositError("Deposit order not found", 404);
+  if (deposit.status === TRANSACTION_STATUS.SUCCESS) {
+    return {
+      transactionId: deposit._id.toString(),
+      amount: deposit.amount,
+      status: deposit.status,
+      balanceBefore: deposit.balanceBefore,
+      balanceAfter: deposit.balanceAfter,
+    };
+  }
+  if (deposit.status !== TRANSACTION_STATUS.PENDING) throw createDepositError("Deposit is no longer pending", 409);
+
+  const verified = await paymentService.verifyPayment({ transaction: deposit, paymentData });
+  if (!verified.signatureValid) throw createDepositError("Invalid Razorpay signature", 400);
+  if (orderId !== deposit.gatewayOrderId || verified.orderId !== deposit.gatewayOrderId) {
+    throw createDepositError("Payment order does not match deposit", 400);
+  }
+  if (verified.paymentId !== paymentId) throw createDepositError("Payment identifier does not match", 400);
+  let expectedAmount;
+  try {
+    expectedAmount = rupeesToPaise(deposit.amount);
+  } catch {
+    throw createDepositError("Deposit amount is outside the supported payment range", 400);
+  }
+  if (verified.amount !== expectedAmount) throw createDepositError("Payment amount does not match deposit", 400);
+  if (verified.currency !== "INR") throw createDepositError("Payment currency must be INR", 400);
+  if (verified.status !== "captured") throw createDepositError("Razorpay payment is not captured", 400);
+
+  const session = await mongoose.startSession();
+  try {
+    let result;
+    await session.withTransaction(async () => {
+      result = await walletService.creditPendingAddMoney({
+        transactionId: deposit._id,
+        userId,
+        amount: deposit.amount,
+        session,
+        gatewayOrderId: orderId,
+        gatewayPaymentId: paymentId,
+        gatewaySignature: signature,
+        gatewayStatus: verified.status,
+        remarks: "Razorpay payment verified",
+      });
+    });
+    return result;
+  } finally {
+    await session.endSession();
   }
 }
 
@@ -359,55 +485,20 @@ async function approveDeposit(transactionId, adminId) {
         throw createDepositError("Deposit has already been processed", 409);
       }
 
-      const wallet = await Wallet.findOne({
-        _id: deposit.walletId,
-        userId: deposit.userId,
-      }).session(session);
-      if (!wallet) throw createDepositError("Wallet not found", 404);
-
-      const balanceBefore = roundMoney(wallet.balance);
-      let balanceAfter;
-      try {
-        balanceAfter = addMoney(balanceBefore, deposit.amount);
-      } catch (error) {
-        throw createDepositError("Wallet balance is outside the supported range", 400);
-      }
-
-      const updatedWallet = await Wallet.findOneAndUpdate(
-        { _id: wallet._id, balance: wallet.balance },
-        { $set: { balance: balanceAfter } },
-        { new: true, runValidators: true, session }
-      );
-      if (!updatedWallet) {
-        throw createDepositError("Wallet changed during approval; retry the request", 409);
-      }
-
       const now = new Date();
-      const updatedDeposit = await WalletTransaction.findOneAndUpdate(
-        {
-          _id: deposit._id,
-          transactionType: TRANSACTION_TYPE.ADD_MONEY,
-          status: TRANSACTION_STATUS.PENDING,
-        },
-        {
-          $set: {
-            status: TRANSACTION_STATUS.SUCCESS,
-            balanceBefore,
-            balanceAfter,
-            processedBy: adminId,
-            processedAt: now,
-            remarks: "Deposit approved",
-          },
-        },
-        { new: true, runValidators: true, session }
-      );
-      if (!updatedDeposit) {
-        throw createDepositError("Deposit has already been processed", 409);
-      }
+      const updatedDeposit = await walletService.creditPendingAddMoney({
+        transactionId: deposit._id,
+        userId: deposit.userId,
+        amount: deposit.amount,
+        session,
+        processedBy: adminId,
+        processedAt: now,
+        remarks: "Deposit approved",
+      });
 
       result = {
-        transactionId: updatedDeposit._id.toString(),
-        userId: updatedDeposit.userId.toString(),
+        transactionId: updatedDeposit.transactionId,
+        userId: deposit.userId.toString(),
         amount: updatedDeposit.amount,
         status: updatedDeposit.status,
       };
@@ -485,6 +576,8 @@ async function getDepositProof(transactionId, fileName, userId, role) {
 
 module.exports = {
   createDeposit,
+  createPaymentOrder,
+  verifyRazorpayDeposit,
   getUserDeposits,
   getPendingDeposits,
   getAdminDeposits,

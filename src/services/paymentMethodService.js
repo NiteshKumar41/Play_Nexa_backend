@@ -25,6 +25,14 @@ function normalizeRequiredText(value, label) {
   return value.trim();
 }
 
+function normalizeUpiId(value) {
+  const upiId = normalizeRequiredText(value, "UPI ID");
+  if (!/^[^@\s]+@[^@\s]+$/.test(upiId)) {
+    throw createPaymentMethodError("Enter a valid UPI ID", 400);
+  }
+  return upiId;
+}
+
 function formatPaymentMethod(paymentMethod) {
   return {
     id: paymentMethod._id.toString(),
@@ -90,8 +98,14 @@ async function createPaymentMethod(adminId, data, qrFile) {
   if (!data || typeof data !== "object") {
     throw createPaymentMethodError("Payment method details are required", 400);
   }
-  const upiId = normalizeRequiredText(data.upiId, "UPI ID");
+  const upiId = normalizeUpiId(data.upiId);
   const payeeName = normalizeRequiredText(data.payeeName, "Payee name");
+  if (!qrFile) {
+    throw createPaymentMethodError(
+      "QR image is required when creating a payment method",
+      400
+    );
+  }
   if (data.status !== undefined) {
     throw createPaymentMethodError(
       "Use the activate endpoint to change payment method status",
@@ -146,7 +160,7 @@ async function updatePaymentMethod(paymentMethodId, adminId, data, qrFile) {
   }
 
   if (data.upiId !== undefined) {
-    paymentMethod.upiId = normalizeRequiredText(data.upiId, "UPI ID");
+    paymentMethod.upiId = normalizeUpiId(data.upiId);
   }
   if (data.payeeName !== undefined) {
     paymentMethod.payeeName = normalizeRequiredText(data.payeeName, "Payee name");

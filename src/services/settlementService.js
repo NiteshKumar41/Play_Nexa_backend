@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const GameMatch = require("../models/GameMatch");
+const User = require("../models/User");
 const WalletTransaction = require("../models/WalletTransaction");
 const { MATCH_STATUS } = require("../constants/matchStatus");
 const { WINNER_CLAIM_STATUS } = require("../constants/winnerClaimStatus");
@@ -160,6 +161,17 @@ async function findMatch(matchId, session) {
   return match;
 }
 
+async function validatePlayersExist(match, session) {
+  const players = await User.find({
+    _id: { $in: [match.player1, match.player2] },
+  })
+    .select("_id")
+    .session(session);
+  if (players.length !== 2) {
+    throw createSettlementError("Both match players must exist", 404);
+  }
+}
+
 async function declareWinner(matchId, adminId, winnerUserId, reason) {
   validateObjectId(matchId, "match ID");
   validateObjectId(adminId, "admin");
@@ -172,6 +184,7 @@ async function declareWinner(matchId, adminId, winnerUserId, reason) {
     await session.withTransaction(async () => {
       const match = await findMatch(matchId, session);
       validateSettleableMatch(match);
+      await validatePlayersExist(match, session);
 
       const winnerId = winnerUserId.toString();
       const player1Id = match.player1.toString();
@@ -231,6 +244,7 @@ async function declareWinner(matchId, adminId, winnerUserId, reason) {
             prizePool: financials.totalPool,
             platformFee: financials.platformFee,
             winnerAmount: financials.winnerAmount,
+            winnerTransactionId: walletChange.transactionId,
             settledAt,
             settledBy: adminId,
             settlementAction: "DECLARE_WINNER",
@@ -286,6 +300,7 @@ async function refundBothPlayers(
         throw createSettlementError("Match has already been refunded", 409);
       }
       validateSettleableMatch(match);
+      await validatePlayersExist(match, session);
       validateMatchAmounts(match);
 
       const existingRefunds = await WalletTransaction.find({
@@ -337,6 +352,7 @@ async function refundBothPlayers(
             winnerPlayer: null,
             winnerClaimStatus: WINNER_CLAIM_STATUS.REJECTED,
             winnerAmount: 0,
+            winnerTransactionId: null,
             platformFee: 0,
             cancelledAt: now,
             settledAt: now,
@@ -383,11 +399,20 @@ async function settleMatch(matchId, adminId, settlementData) {
   if (!settlementData || typeof settlementData !== "object" || Array.isArray(settlementData)) {
     throw createSettlementError("Invalid settlement request", 400);
   }
-  const allowedFields = ["action", "winnerUserId", "reason"];
+  const allowedFields = ["action", "winnerUserId", "winnerId", "reason"];
   if (Object.keys(settlementData).some(field => !allowedFields.includes(field))) {
     throw createSettlementError("Settlement request contains unsupported fields", 400);
   }
   validateAction(settlementData.action);
+
+  if (
+    settlementData.winnerId !== undefined &&
+    settlementData.winnerUserId !== undefined &&
+    settlementData.winnerId.toString() !== settlementData.winnerUserId.toString()
+  ) {
+    throw createSettlementError("Conflicting winner IDs", 400);
+  }
+  const winnerId = settlementData.winnerId ?? settlementData.winnerUserId;
 
   console.log(
     `Settlement started: match=${matchId} admin=${adminId} action=${settlementData.action}`
@@ -395,17 +420,17 @@ async function settleMatch(matchId, adminId, settlementData) {
 
   let result;
   if (settlementData.action === "DECLARE_WINNER") {
-    if (settlementData.winnerUserId === undefined) {
-      throw createSettlementError("winnerUserId is required", 400);
+    if (winnerId === undefined) {
+      throw createSettlementError("winnerId is required", 400);
     }
     result = await declareWinner(
       matchId,
       adminId,
-      settlementData.winnerUserId,
+      winnerId,
       settlementData.reason
     );
   } else {
-    if (settlementData.winnerUserId !== undefined) {
+    if (winnerId !== undefined) {
       throw createSettlementError(
         "winnerUserId is only allowed when declaring a winner",
         400

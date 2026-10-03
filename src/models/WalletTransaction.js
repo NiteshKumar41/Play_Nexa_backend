@@ -32,6 +32,26 @@ const walletTransactionSchema = new mongoose.Schema(
       trim: true,
       maxlength: 200,
     },
+    gatewayOrderId: {
+      type: String,
+    },
+    gatewayPaymentId: {
+      type: String,
+    },
+    providerRefundId: {
+      type: String,
+      trim: true,
+    },
+    originalTransactionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "WalletTransaction",
+    },
+    gatewaySignature: {
+      type: String,
+    },
+    gatewayStatus: {
+      type: String,
+    },
     clientRequestId: {
       type: String,
       trim: true,
@@ -83,7 +103,7 @@ const walletTransactionSchema = new mongoose.Schema(
     },
     referenceType: {
       type: String,
-      enum: ["MATCH_SETTLEMENT", "MATCH_REFUND"],
+      enum: ["MATCH_SETTLEMENT", "MATCH_REFUND", "WITHDRAWAL", "ADD_MONEY_REFUND"],
     },
   },
   {
@@ -107,6 +127,27 @@ walletTransactionSchema.index(
     partialFilterExpression: {
       transactionType: "WITHDRAW",
       clientRequestId: { $type: "string" },
+    },
+  }
+);
+walletTransactionSchema.index(
+  { userId: 1, transactionType: 1, clientRequestId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      transactionType: "ADD_MONEY",
+      clientRequestId: { $type: "string" },
+    },
+  }
+);
+walletTransactionSchema.index({ gatewayOrderId: 1 });
+walletTransactionSchema.index(
+  { providerRefundId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      transactionType: "ADD_MONEY_REFUND",
+      providerRefundId: { $type: "string" },
     },
   }
 );
@@ -139,6 +180,17 @@ walletTransactionSchema.index(
     partialFilterExpression: {
       transactionType: "GAME_REFUND",
       referenceType: "MATCH_REFUND",
+      status: "SUCCESS",
+    },
+  }
+);
+walletTransactionSchema.index(
+  { transactionType: 1, referenceType: 1, referenceId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      transactionType: "WITHDRAW_REFUND",
+      referenceType: "WITHDRAWAL",
       status: "SUCCESS",
     },
   }

@@ -31,7 +31,14 @@ app.use(
     },
   })
 );
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({
+  limit: "1mb",
+  verify(request, response, buffer) {
+    if (request.path === "/api/v1/webhooks/razorpay") {
+      request.rawBody = Buffer.from(buffer);
+    }
+  },
+}));
 app.use(
   express.urlencoded({
     extended: false,
@@ -53,6 +60,8 @@ app.get("/api/health", sendHealthResponse);
 
 app.use("/api/v1/auth", require("./routes/authRoutes"));
 app.use("/api/v1/wallet", require("./routes/walletRoutes"));
+app.use("/api/v1/payments/razorpay", require("./routes/paymentRoutes"));
+app.use("/api/v1/webhooks", require("./routes/webhookRoutes"));
 app.use("/api/v1/wallet/withdrawals", require("./routes/withdrawalRoutes"));
 app.use("/api/v1/support", require("./routes/supportRoutes"));
 app.use("/api/v1/games", require("./routes/gameRoutes"));

@@ -41,6 +41,7 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
   const User = require("../src/models/User");
   const Wallet = require("../src/models/Wallet");
   const WalletTransaction = require("../src/models/WalletTransaction");
+  const PaymentEvent = require("../src/models/PaymentEvent");
   const Game = require("../src/models/Game");
   const GameMatch = require("../src/models/GameMatch");
   const PaymentMethod = require("../src/models/PaymentMethod");
@@ -492,6 +493,189 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
       assert.equal(transaction.status, "SUCCESS");
     });
 
+    it("creates authenticated Razorpay orders idempotently without changing wallets", async () => {
+      const paymentService = require("../src/services/paymentService");
+      const wallet = await Wallet.findOne({ userId: players[0]._id });
+      const startingBalance = wallet.balance;
+      let orderSequence = 0;
+      let providerCalls = 0;
+      paymentService.setProviderAdapter({
+        createOrder: async ({ transaction }) => {
+          providerCalls += 1;
+          orderSequence += 1;
+          return { id: `order_api_mock_${orderSequence}`, amount: Math.round(transaction.amount * 100), currency: "INR", status: "created" };
+        },
+        verifyPayment: async () => ({}),
+        verifyWebhook: async () => true,
+        refundPayment: async () => ({}),
+      });
+      try {
+        const unauthenticated = await api("/api/v1/payments/razorpay/order", {
+          method: "POST", body: { amount: 40, clientRequestId: "order-api-auth" },
+        });
+        assert.equal(unauthenticated.response.status, 401);
+
+        const body = { amount: 40, clientRequestId: "order-api-same" };
+        const first = await api("/api/v1/payments/razorpay/order", { token: tokens[0], method: "POST", body });
+        assert.equal(first.response.status, 201, JSON.stringify(first.data));
+        const retry = await api("/api/v1/payments/razorpay/order", { token: tokens[0], method: "POST", body });
+        assert.equal(retry.response.status, 201);
+        assert.equal(retry.data.data.transactionId, first.data.data.transactionId);
+        assert.equal(retry.data.data.gatewayOrderId, first.data.data.gatewayOrderId);
+        assert.equal(providerCalls, 1);
+
+        const different = await api("/api/v1/payments/razorpay/order", {
+          token: tokens[0], method: "POST", body: { amount: 40, clientRequestId: "order-api-different" },
+        });
+        assert.equal(different.response.status, 201);
+        assert.notEqual(different.data.data.transactionId, first.data.data.transactionId);
+        assert.notEqual(different.data.data.gatewayOrderId, first.data.data.gatewayOrderId);
+
+        const bodyIdentity = await api("/api/v1/payments/razorpay/order", {
+          token: tokens[0], method: "POST", body: { amount: 40, clientRequestId: "order-api-body-user", userId: players[1]._id.toString(), walletId: "ignored" },
+        });
+        assert.equal(bodyIdentity.response.status, 400);
+        assert.equal(await WalletTransaction.countDocuments({ clientRequestId: "order-api-body-user" }), 0);
+        assert.equal((await Wallet.findById(wallet._id)).balance, startingBalance);
+        for (const transactionId of [first.data.data.transactionId, different.data.data.transactionId]) {
+          const transaction = await WalletTransaction.findById(transactionId);
+          assert.equal(transaction.userId.toString(), players[0]._id.toString());
+          assert.equal(transaction.status, "PENDING");
+          assert.ok(transaction.gatewayOrderId);
+        }
+      } finally {
+        paymentService.setProviderAdapter(null);
+      }
+    });
+
+    it("verifies mocked Razorpay payments and credits an ADD_MONEY deposit once", async () => {
+      const paymentService = require("../src/services/paymentService");
+      const wallet = await Wallet.findOne({ userId: players[0]._id });
+      const deposit = await WalletTransaction.create({
+        userId: players[0]._id,
+        walletId: wallet._id,
+        transactionType: "ADD_MONEY",
+        amount: 125,
+        balanceBefore: 0,
+        balanceAfter: 0,
+        status: "PENDING",
+        gatewayOrderId: "order_mock_18",
+      });
+      let mocked = { signatureValid: true, orderId: "order_mock_18", paymentId: "pay_mock_18", amount: 12500, currency: "INR", status: "captured" };
+      paymentService.setProviderAdapter({
+        createOrder: async () => ({}),
+        verifyPayment: async () => mocked,
+        verifyWebhook: async () => ({}),
+        refundPayment: async () => ({}),
+      });
+      const body = { razorpay_order_id: "order_mock_18", razorpay_payment_id: "pay_mock_18", razorpay_signature: "mock_signature" };
+      const verify = () => api("/api/v1/wallet/deposits/verify", { token: tokens[0], method: "POST", body });
+
+      mocked = { ...mocked, signatureValid: false };
+      assert.equal((await verify()).response.status, 400);
+      assert.equal((await Wallet.findById(wallet._id)).balance, 0);
+      assert.equal((await WalletTransaction.findById(deposit._id)).status, "PENDING");
+
+      mocked = { ...mocked, signatureValid: true, orderId: "order_other" };
+      assert.equal((await verify()).response.status, 400);
+      mocked = { ...mocked, orderId: "order_mock_18", amount: 12499 };
+      assert.equal((await verify()).response.status, 400);
+      mocked = { ...mocked, amount: 12500, currency: "USD" };
+      assert.equal((await verify()).response.status, 400);
+      assert.equal((await Wallet.findById(wallet._id)).balance, 0);
+
+      mocked = { ...mocked, currency: "INR" };
+      const first = await verify();
+      assert.equal(first.response.status, 200, JSON.stringify(first.data));
+      assert.equal((await Wallet.findById(wallet._id)).balance, 125);
+      const second = await verify();
+      assert.equal(second.response.status, 200);
+      assert.equal((await Wallet.findById(wallet._id)).balance, 125);
+      const saved = await WalletTransaction.findById(deposit._id);
+      assert.equal(saved.status, "SUCCESS");
+      assert.equal(saved.gatewayPaymentId, "pay_mock_18");
+      assert.equal(saved.gatewayStatus, "captured");
+      assert.equal(await WalletTransaction.countDocuments({ _id: deposit._id, transactionType: "ADD_MONEY", status: "SUCCESS" }), 1);
+      paymentService.setProviderAdapter(null);
+    });
+
+    it("deduplicates signed Razorpay webhooks and rolls back wallet and event writes atomically", async () => {
+      const crypto = require("node:crypto");
+      const previousSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+      process.env.RAZORPAY_WEBHOOK_SECRET = "integration_webhook_secret_only";
+      const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+      const wallet = await Wallet.findOne({ userId: players[0]._id });
+      const startingBalance = wallet.balance;
+      let suffix = 0;
+      async function makeDeposit(amount = 80) {
+        suffix += 1;
+        return WalletTransaction.create({
+          userId: players[0]._id, walletId: wallet._id, transactionType: "ADD_MONEY",
+          amount, balanceBefore: startingBalance, balanceAfter: startingBalance,
+          status: "PENDING", gatewayOrderId: `order_hook_${suffix}`,
+        });
+      }
+      async function sendWebhook(eventId, orderId, amount, currency = "INR", signatureOverride) {
+        const rawBody = JSON.stringify({ event: "payment.captured", payload: { payment: { entity: {
+          id: `pay_${eventId}`, order_id: orderId, amount, currency, status: "captured",
+        } } } });
+        const signature = signatureOverride || crypto.createHmac("sha256", secret).update(Buffer.from(rawBody)).digest("hex");
+        const response = await fetch(`${baseUrl}/api/v1/webhooks/razorpay`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-razorpay-signature": signature, "x-razorpay-event-id": eventId },
+          body: rawBody,
+        });
+        return { response, data: await response.json() };
+      }
+      try {
+        const deposit = await makeDeposit();
+        const invalid = await sendWebhook("evt_bad_sig", deposit.gatewayOrderId, 8000, "INR", "bad_signature");
+        assert.equal(invalid.response.status, 400);
+        assert.equal(await PaymentEvent.countDocuments({ eventId: "evt_bad_sig" }), 0);
+        assert.equal((await Wallet.findById(wallet._id)).balance, startingBalance);
+
+        const applied = await sendWebhook("evt_valid", deposit.gatewayOrderId, 8000);
+        assert.equal(applied.response.status, 200, JSON.stringify(applied.data));
+        const duplicate = await sendWebhook("evt_valid", deposit.gatewayOrderId, 8000);
+        assert.equal(duplicate.response.status, 200);
+        assert.equal(duplicate.data.data.duplicate, true);
+        assert.equal((await Wallet.findById(wallet._id)).balance, startingBalance + 80);
+        assert.equal(await PaymentEvent.countDocuments({ provider: "RAZORPAY", eventId: "evt_valid" }), 1);
+        assert.equal(await WalletTransaction.countDocuments({ _id: deposit._id, status: "SUCCESS" }), 1);
+
+        const mismatch = await makeDeposit(30);
+        await sendWebhook("evt_amount_bad", mismatch.gatewayOrderId, 2999);
+        await sendWebhook("evt_currency_bad", mismatch.gatewayOrderId, 3000, "USD");
+        const unknown = await sendWebhook("evt_unknown", "order_unknown", 1000);
+        assert.equal(unknown.response.status, 200);
+        assert.equal((await Wallet.findById(wallet._id)).balance, startingBalance + 80);
+        assert.equal((await WalletTransaction.findById(mismatch._id)).status, "PENDING");
+
+        const verified = await makeDeposit(20);
+        await WalletTransaction.updateOne({ _id: verified._id }, { $set: { status: "SUCCESS" } });
+        const alreadyVerified = await sendWebhook("evt_after_verify", verified.gatewayOrderId, 2000);
+        assert.equal(alreadyVerified.response.status, 200);
+        assert.equal((await Wallet.findById(wallet._id)).balance, startingBalance + 80);
+        assert.equal(await PaymentEvent.countDocuments({ eventId: "evt_after_verify", status: "IGNORED" }), 1);
+
+        const rollback = await makeDeposit(15);
+        const originalUpdate = Wallet.findOneAndUpdate;
+        Wallet.findOneAndUpdate = async () => { throw new Error("simulated wallet persistence failure"); };
+        try {
+          const rolledBack = await sendWebhook("evt_rollback", rollback.gatewayOrderId, 1500);
+          assert.equal(rolledBack.response.status, 500);
+        } finally {
+          Wallet.findOneAndUpdate = originalUpdate;
+        }
+        assert.equal((await Wallet.findById(wallet._id)).balance, startingBalance + 80);
+        assert.equal((await WalletTransaction.findById(rollback._id)).status, "PENDING");
+        assert.equal(await PaymentEvent.countDocuments({ eventId: "evt_rollback" }), 0);
+      } finally {
+        if (previousSecret === undefined) delete process.env.RAZORPAY_WEBHOOK_SECRET;
+        else process.env.RAZORPAY_WEBHOOK_SECRET = previousSecret;
+      }
+    });
+
     it("reserves withdrawals atomically and refunds rejected withdrawals once", async () => {
       const wallet = await Wallet.findOne({ userId: players[0]._id });
       const successful = await api("/api/v1/wallet/withdrawals", {
@@ -509,8 +693,17 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
         successful.data.data.transactionId
       ).lean();
       assert.equal(withdrawal.userId.toString(), players[0]._id.toString());
+      assert.equal(withdrawal.transactionType, "WITHDRAW");
       assert.equal(withdrawal.status, "INITIATED");
       assert.equal(withdrawal.balanceAfter, withdrawal.balanceBefore - withdrawal.amount);
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          userId: players[0]._id,
+          transactionType: "WITHDRAW",
+          clientRequestId: "test-withdrawal-success",
+        }),
+        1
+      );
 
       const markedSuccess = await api(
         `/api/v1/admin/withdrawals/${withdrawal._id}/success`,
@@ -552,6 +745,23 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
       });
       assert.equal(refund.response.status, 200);
       assert.equal((await Wallet.findById(wallet._id)).balance, 400);
+      const reversal = await WalletTransaction.findOne({
+        transactionType: "WITHDRAW_REFUND",
+        referenceType: "WITHDRAWAL",
+        referenceId: rejectedWithdrawal.data.data.transactionId,
+      }).lean();
+      assert.ok(reversal);
+      assert.equal(reversal.amount, 50);
+      assert.equal(reversal.balanceBefore, 350);
+      assert.equal(reversal.balanceAfter, 400);
+      assert.equal(reversal.status, "SUCCESS");
+      const originalWithdrawal = await WalletTransaction.findById(
+        rejectedWithdrawal.data.data.transactionId
+      ).lean();
+      assert.equal(originalWithdrawal.transactionType, "WITHDRAW");
+      assert.equal(originalWithdrawal.status, "FAILED");
+      assert.equal(originalWithdrawal.balanceBefore, 400);
+      assert.equal(originalWithdrawal.balanceAfter, 350);
       assert.equal(
         (
           await api(rejectUrl, {
@@ -561,6 +771,15 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
           })
         ).response.status,
         409
+      );
+      assert.equal((await Wallet.findById(wallet._id)).balance, 400);
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          transactionType: "WITHDRAW_REFUND",
+          referenceType: "WITHDRAWAL",
+          referenceId: rejectedWithdrawal.data.data.transactionId,
+        }),
+        1
       );
 
       const insufficient = await api("/api/v1/wallet/withdrawals", {
@@ -675,7 +894,7 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
       const outsiderDetails = await api(`/api/v1/matches/${matchId}`, {
         token: tokens[2],
       });
-      assert.equal(Object.hasOwn(outsiderDetails.data.data.match, "roomCode"), false);
+      assert.equal(outsiderDetails.response.status, 403);
       assert.equal(
         (await joinMatch(2, matchId)).response.status,
         409
@@ -727,6 +946,64 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
         }
       );
       assert.equal(cancelAfterJoin.response.status, 400);
+    });
+
+    it("enforces stored match join deadlines before wallet debit and preserves legacy and concurrent joins", async () => {
+      const creatorWallet = await Wallet.findOne({ userId: players[0]._id });
+      const joinerWallet = await Wallet.findOne({ userId: players[1]._id });
+      const thirdPlayerWallet = await Wallet.findOne({ userId: players[2]._id });
+      for (const wallet of [creatorWallet, joinerWallet, thirdPlayerWallet]) {
+        await Wallet.updateOne({ _id: wallet._id }, { $set: { balance: 500 } });
+      }
+
+      const beforeDeadlineMatch = await createMatch(0);
+      const beforeDeadlineId = beforeDeadlineMatch.data.data.match.id;
+      await GameMatch.updateOne(
+        { _id: beforeDeadlineId },
+        { $set: { joinDeadline: new Date(Date.now() + 60_000) } }
+      );
+      const beforeJoin = await joinMatch(1, beforeDeadlineId);
+      assert.equal(beforeJoin.response.status, 200);
+
+      for (const deadline of [new Date(Date.now() - 1), new Date()]) {
+        const expiredMatch = await createMatch(0);
+        const expiredId = expiredMatch.data.data.match.id;
+        await GameMatch.updateOne({ _id: expiredId }, { $set: { joinDeadline: deadline } });
+        const balanceBeforeJoin = (await Wallet.findById(joinerWallet._id)).balance;
+        const expiredJoin = await joinMatch(1, expiredId);
+        assert.equal(expiredJoin.response.status, 409);
+        assert.equal(expiredJoin.data.message, "Match joining deadline has passed");
+        assert.equal((await Wallet.findById(joinerWallet._id)).balance, balanceBeforeJoin);
+        assert.equal(
+          await WalletTransaction.countDocuments({
+            userId: players[1]._id,
+            transactionType: "GAME_JOIN",
+            referenceId: expiredId,
+          }),
+          0
+        );
+        assert.equal((await GameMatch.findById(expiredId)).player2, null);
+      }
+
+      const legacyMatch = await createMatch(0);
+      const legacyId = legacyMatch.data.data.match.id;
+      await GameMatch.updateOne({ _id: legacyId }, { $unset: { joinDeadline: 1 } });
+      assert.equal((await joinMatch(1, legacyId)).response.status, 200);
+
+      const concurrentMatch = await createMatch(0);
+      const concurrentId = concurrentMatch.data.data.match.id;
+      const concurrentResults = await Promise.all([
+        joinMatch(1, concurrentId),
+        joinMatch(2, concurrentId),
+      ]);
+      assert.equal(concurrentResults.filter(result => result.response.status === 200).length, 1);
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          transactionType: "GAME_JOIN",
+          referenceId: concurrentId,
+        }),
+        1
+      );
     });
 
     it("submits claims/disputes and atomically settles disputed matches once", async () => {

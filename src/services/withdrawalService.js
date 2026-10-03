@@ -602,6 +602,27 @@ async function rejectWithdrawal(transactionId, adminId, reason) {
         );
       }
 
+      await WalletTransaction.create(
+        [
+          {
+            walletId: wallet._id,
+            userId: withdrawal.userId,
+            phone: withdrawal.phone,
+            transactionType: TRANSACTION_TYPE.WITHDRAW_REFUND,
+            amount: withdrawal.amount,
+            balanceBefore,
+            balanceAfter,
+            status: TRANSACTION_STATUS.SUCCESS,
+            processedBy: adminId,
+            processedAt,
+            remarks: `Refund for rejected withdrawal: ${reason.trim()}`,
+            referenceType: "WITHDRAWAL",
+            referenceId: withdrawal._id.toString(),
+          },
+        ],
+        { session }
+      );
+
       result = {
         transactionId: updatedWithdrawal._id.toString(),
         userId: updatedWithdrawal.userId.toString(),

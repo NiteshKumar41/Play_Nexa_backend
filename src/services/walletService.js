@@ -100,6 +100,9 @@ async function updateWalletBalance({
   remarks,
   referenceId,
   referenceType,
+  gatewayPaymentId,
+  providerRefundId,
+  originalTransactionId,
   phone,
   isCredit,
   session: existingSession,
@@ -152,6 +155,9 @@ async function updateWalletBalance({
           remarks,
           referenceId,
           referenceType,
+          gatewayPaymentId,
+          providerRefundId,
+          originalTransactionId,
         },
       ],
       { session }
@@ -189,6 +195,9 @@ async function creditWallet({
   remarks,
   referenceId,
   referenceType,
+  gatewayPaymentId,
+  providerRefundId,
+  originalTransactionId,
   phone,
   session,
 } = {}) {
@@ -199,6 +208,9 @@ async function creditWallet({
     remarks,
     referenceId,
     referenceType,
+    gatewayPaymentId,
+    providerRefundId,
+    originalTransactionId,
     phone,
     session,
     isCredit: true,
@@ -212,6 +224,9 @@ async function debitWallet({
   remarks,
   referenceId,
   referenceType,
+  gatewayPaymentId,
+  providerRefundId,
+  originalTransactionId,
   phone,
   session,
 } = {}) {
@@ -222,10 +237,98 @@ async function debitWallet({
     remarks,
     referenceId,
     referenceType,
+    gatewayPaymentId,
+    providerRefundId,
+    originalTransactionId,
     phone,
     session,
     isCredit: false,
   });
+}
+
+async function creditPendingAddMoney({
+  transactionId,
+  userId,
+  amount,
+  session,
+  gatewayOrderId,
+  gatewayPaymentId,
+  gatewaySignature,
+  gatewayStatus,
+  processedBy,
+  processedAt,
+  remarks,
+}) {
+  validateUserId(userId);
+  validateAmount(amount);
+  if (!session) throw createWalletError("A MongoDB session is required", 400);
+  const deposit = await WalletTransaction.findOne({
+    _id: transactionId,
+    userId,
+    transactionType: TRANSACTION_TYPE.ADD_MONEY,
+  }).session(session);
+  if (!deposit) throw createWalletError("Deposit order not found", 404);
+  if (gatewayOrderId && deposit.gatewayOrderId !== gatewayOrderId) {
+    throw createWalletError("Deposit order does not match", 409);
+  }
+  if (roundMoney(deposit.amount) !== roundMoney(amount)) {
+    throw createWalletError("Deposit amount does not match transaction", 409);
+  }
+
+  if (deposit.status === TRANSACTION_STATUS.SUCCESS) {
+    return {
+      transactionId: deposit._id.toString(),
+      amount: deposit.amount,
+      status: deposit.status,
+      balanceBefore: deposit.balanceBefore,
+      balanceAfter: deposit.balanceAfter,
+    };
+  }
+  if (deposit.status !== TRANSACTION_STATUS.PENDING) {
+    throw createWalletError("Deposit is no longer pending", 409);
+  }
+
+  const wallet = await Wallet.findOne({ _id: deposit.walletId, userId }).session(session);
+  if (!wallet) throw createWalletError("Wallet not found", 404);
+  const balanceBefore = roundMoney(wallet.balance);
+  const balanceAfter = addMoney(balanceBefore, deposit.amount);
+  const updatedWallet = await Wallet.findOneAndUpdate(
+    { _id: wallet._id, balance: wallet.balance },
+    { $set: { balance: balanceAfter } },
+    { new: true, runValidators: true, session }
+  );
+  if (!updatedWallet) throw createWalletError("Wallet changed during deposit verification; retry", 409);
+
+  const updatedDeposit = await WalletTransaction.findOneAndUpdate(
+    {
+      _id: deposit._id,
+      userId,
+      transactionType: TRANSACTION_TYPE.ADD_MONEY,
+      status: TRANSACTION_STATUS.PENDING,
+    },
+    {
+      $set: {
+        status: TRANSACTION_STATUS.SUCCESS,
+        balanceBefore,
+        balanceAfter,
+        ...(gatewayPaymentId !== undefined ? { gatewayPaymentId } : {}),
+        ...(gatewaySignature !== undefined ? { gatewaySignature } : {}),
+        ...(gatewayStatus !== undefined ? { gatewayStatus } : {}),
+        ...(processedBy !== undefined ? { processedBy } : {}),
+        processedAt: processedAt || new Date(),
+        ...(remarks !== undefined ? { remarks } : {}),
+      },
+    },
+    { new: true, runValidators: true, session }
+  );
+  if (!updatedDeposit) throw createWalletError("Deposit has already been processed", 409);
+  return {
+    transactionId: updatedDeposit._id.toString(),
+    amount: updatedDeposit.amount,
+    status: updatedDeposit.status,
+    balanceBefore: updatedDeposit.balanceBefore,
+    balanceAfter: updatedDeposit.balanceAfter,
+  };
 }
 
 async function getTransactions(userId, { page = 1, limit = 10 } = {}) {
@@ -272,5 +375,6 @@ module.exports = {
   createWallet,
   creditWallet,
   debitWallet,
+  creditPendingAddMoney,
   getTransactions,
 };

@@ -30,6 +30,17 @@ function validateEntryFee(entryFee) {
   ) {
     throw createMatchError("Entry fee must be a number greater than 0", 400);
   }
+
+  try {
+    const normalizedEntryFee = roundMoney(entryFee);
+    if (normalizedEntryFee <= 0) {
+      throw createMatchError("Entry fee must be at least 0.01", 400);
+    }
+    return normalizedEntryFee;
+  } catch (error) {
+    if (error.statusCode) throw error;
+    throw createMatchError("Entry fee is outside the supported range", 400);
+  }
 }
 
 function validateClientRequestId(clientRequestId) {
@@ -49,11 +60,15 @@ function validateClientRequestId(clientRequestId) {
 }
 
 function isSameCreateRequest(match, { gameId, entryFee, userId }) {
-  return (
-    match.player1.toString() === userId.toString() &&
-    match.gameId.toString() === gameId.toString() &&
-    Number(match.player1Amount) === Number(entryFee)
-  );
+  try {
+    return (
+      match.player1.toString() === userId.toString() &&
+      match.gameId.toString() === gameId.toString() &&
+      roundMoney(match.player1Amount) === roundMoney(entryFee)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function formatMatch(
@@ -137,8 +152,11 @@ async function createMatch(matchData, userId) {
   ]);
   validateObjectId(userId, "user");
   validateObjectId(gameId, "game ID");
-  validateEntryFee(entryFee);
+  const normalizedEntryFee = validateEntryFee(entryFee);
   const clientRequestId = validateClientRequestId(rawClientRequestId);
+  if (!clientRequestId) {
+    throw createMatchError("clientRequestId is required for match creation", 400);
+  }
 
   if (clientRequestId) {
     const existingMatch = await GameMatch.findOne({
@@ -147,7 +165,11 @@ async function createMatch(matchData, userId) {
     });
 
     if (existingMatch) {
-      if (!isSameCreateRequest(existingMatch, { gameId, entryFee, userId })) {
+      if (!isSameCreateRequest(existingMatch, {
+        gameId,
+        entryFee: normalizedEntryFee,
+        userId,
+      })) {
         throw createMatchError(
           "This client request ID was already used for a different match",
           409
@@ -192,10 +214,11 @@ async function createMatch(matchData, userId) {
       const matchId = new mongoose.Types.ObjectId();
       const walletChange = await walletService.debitWallet({
         userId,
-        amount: entryFee,
+        amount: normalizedEntryFee,
         transactionType: TRANSACTION_TYPE.GAME_CREATE,
         remarks: "Match entry reserved",
         referenceId: matchId.toString(),
+        referenceType: "MATCH",
         session,
       });
 
@@ -208,7 +231,7 @@ async function createMatch(matchData, userId) {
             player1: user._id,
             player1Name: user.fullName,
             player1Phone: user.phone,
-            player1Amount: entryFee,
+            player1Amount: normalizedEntryFee,
             player2: null,
             player2Name: null,
             player2Phone: null,
@@ -217,7 +240,7 @@ async function createMatch(matchData, userId) {
             walletTransactionIdPlayer2: null,
             status: MATCH_STATUS.ACTIVE,
             roomCode: "",
-            prizePool: entryFee,
+            prizePool: normalizedEntryFee,
             platformFee: 0,
             winnerAmount: 0,
             createdBy: user._id,
@@ -238,7 +261,11 @@ async function createMatch(matchData, userId) {
       });
 
       if (existingMatch) {
-        if (!isSameCreateRequest(existingMatch, { gameId, entryFee, userId })) {
+        if (!isSameCreateRequest(existingMatch, {
+          gameId,
+          entryFee: normalizedEntryFee,
+          userId,
+        })) {
           throw createMatchError(
             "This client request ID was already used for a different match",
             409
@@ -389,6 +416,7 @@ async function joinMatch(matchId, userId) {
         transactionType: TRANSACTION_TYPE.GAME_JOIN,
         remarks: "Match entry",
         referenceId: match._id.toString(),
+        referenceType: "MATCH",
         session,
       });
 
@@ -511,12 +539,22 @@ async function leaveMatch(matchId, userId) {
         throw createMatchError("Match is no longer available", 400);
       }
 
+      await walletService.getSuccessfulMatchEntry({
+        walletTransactionId: match.walletTransactionIdPlayer2,
+        userId,
+        matchId: match._id,
+        transactionType: TRANSACTION_TYPE.GAME_JOIN,
+        amount: match.player2Amount,
+        session,
+      });
+
       await walletService.creditWallet({
         userId,
         amount: match.player2Amount,
         transactionType: TRANSACTION_TYPE.GAME_REFUND,
         remarks: "Match entry refund",
         referenceId: match._id.toString(),
+        referenceType: "MATCH_REFUND",
         session,
       });
 
@@ -584,6 +622,15 @@ async function cancelMatch(matchId, userId) {
           400
         );
       }
+
+      await walletService.getSuccessfulMatchEntry({
+        walletTransactionId: match.walletTransactionIdPlayer1,
+        userId: match.player1,
+        matchId: match._id,
+        transactionType: TRANSACTION_TYPE.GAME_CREATE,
+        amount: match.player1Amount,
+        session,
+      });
 
       const matchReferenceId = match._id.toString();
       const eligiblePlayerId = match.player1.toString();

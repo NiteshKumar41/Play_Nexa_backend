@@ -206,10 +206,27 @@ async function declareWinner(matchId, adminId, winnerUserId, reason) {
       }
 
       const financials = validateMatchAmounts(match);
+      const matchReferenceId = match._id.toString();
+      const priorRefund = await WalletTransaction.findOne({
+        userId: { $in: [match.player1, match.player2] },
+        transactionType: TRANSACTION_TYPE.GAME_REFUND,
+        referenceType: "MATCH_REFUND",
+        referenceId: matchReferenceId,
+        status: TRANSACTION_STATUS.SUCCESS,
+      })
+        .select("_id")
+        .session(session);
+      if (priorRefund) {
+        throw createSettlementError(
+          "The selected winner has already been refunded for this match",
+          409
+        );
+      }
+
       const priorPayout = await WalletTransaction.findOne({
         transactionType: TRANSACTION_TYPE.GAME_WIN,
         referenceType: "MATCH_SETTLEMENT",
-        referenceId: matchId.toString(),
+        referenceId: matchReferenceId,
         status: TRANSACTION_STATUS.SUCCESS,
       }).session(session);
       if (priorPayout) {
@@ -224,7 +241,7 @@ async function declareWinner(matchId, adminId, winnerUserId, reason) {
         amount: financials.winnerAmount,
         transactionType: TRANSACTION_TYPE.GAME_WIN,
         remarks: "Match winner payout",
-        referenceId: matchId.toString(),
+        referenceId: matchReferenceId,
         referenceType: "MATCH_SETTLEMENT",
         session,
       });
@@ -303,10 +320,27 @@ async function refundBothPlayers(
       await validatePlayersExist(match, session);
       validateMatchAmounts(match);
 
+      const matchReferenceId = match._id.toString();
+      const successfulGameWin = await WalletTransaction.findOne({
+        userId: { $in: [match.player1, match.player2] },
+        transactionType: TRANSACTION_TYPE.GAME_WIN,
+        referenceType: "MATCH_SETTLEMENT",
+        referenceId: matchReferenceId,
+        status: TRANSACTION_STATUS.SUCCESS,
+      })
+        .select("_id userId")
+        .session(session);
+      if (successfulGameWin) {
+        throw createSettlementError(
+          "A successful game settlement already exists for a match player",
+          409
+        );
+      }
+
       const existingRefunds = await WalletTransaction.find({
         transactionType: TRANSACTION_TYPE.GAME_REFUND,
         referenceType: "MATCH_REFUND",
-        referenceId: matchId.toString(),
+        referenceId: matchReferenceId,
         status: TRANSACTION_STATUS.SUCCESS,
       })
         .session(session)
@@ -318,6 +352,23 @@ async function refundBothPlayers(
         );
       }
 
+      await walletService.getSuccessfulMatchEntry({
+        walletTransactionId: match.walletTransactionIdPlayer1,
+        userId: match.player1,
+        matchId: match._id,
+        transactionType: TRANSACTION_TYPE.GAME_CREATE,
+        amount: match.player1Amount,
+        session,
+      });
+      await walletService.getSuccessfulMatchEntry({
+        walletTransactionId: match.walletTransactionIdPlayer2,
+        userId: match.player2,
+        matchId: match._id,
+        transactionType: TRANSACTION_TYPE.GAME_JOIN,
+        amount: match.player2Amount,
+        session,
+      });
+
       const now = new Date();
       const player1Refund = await walletService.creditWallet({
         userId: match.player1.toString(),
@@ -325,7 +376,7 @@ async function refundBothPlayers(
         amount: roundMoney(match.player1Amount),
         transactionType: TRANSACTION_TYPE.GAME_REFUND,
         remarks: "Match entry fee refund",
-        referenceId: matchId.toString(),
+        referenceId: matchReferenceId,
         referenceType: "MATCH_REFUND",
         session,
       });
@@ -335,7 +386,7 @@ async function refundBothPlayers(
         amount: roundMoney(match.player2Amount),
         transactionType: TRANSACTION_TYPE.GAME_REFUND,
         remarks: "Match entry fee refund",
-        referenceId: matchId.toString(),
+        referenceId: matchReferenceId,
         referenceType: "MATCH_REFUND",
         session,
       });

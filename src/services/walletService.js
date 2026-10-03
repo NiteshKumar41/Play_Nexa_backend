@@ -95,25 +95,40 @@ async function createWallet(userId, session) {
 
 async function updateWalletBalance({
   userId,
+  walletId,
   amount,
   transactionType,
+  transactionStatus = TRANSACTION_STATUS.SUCCESS,
   remarks,
   referenceId,
   referenceType,
   gatewayPaymentId,
   providerRefundId,
   originalTransactionId,
+  clientRequestId,
+  upiId,
+  upiApp,
+  processedBy,
+  processedAt,
   phone,
   isCredit,
   session: existingSession,
 }) {
   validateUserId(userId);
+  if (walletId !== undefined && !mongoose.isValidObjectId(walletId)) {
+    throw createWalletError("Invalid wallet", 400);
+  }
   validateAmount(amount);
   validateTransactionType(transactionType);
+  if (!Object.values(TRANSACTION_STATUS).includes(transactionStatus)) {
+    throw createWalletError("Invalid transaction status", 400);
+  }
   const normalizedAmount = roundMoney(amount);
 
   async function applyWalletChange(session) {
-    const wallet = await Wallet.findOne({ userId }).session(session);
+    const walletQuery = { userId };
+    if (walletId !== undefined) walletQuery._id = walletId;
+    const wallet = await Wallet.findOne(walletQuery).session(session);
 
     if (!wallet) {
       throw createWalletError("Wallet not found", 404);
@@ -150,8 +165,13 @@ async function updateWalletBalance({
           amount: normalizedAmount,
           balanceBefore,
           balanceAfter: newBalance,
-          status: TRANSACTION_STATUS.SUCCESS,
+          status: transactionStatus,
           phone,
+          upiId,
+          upiApp,
+          clientRequestId,
+          processedBy,
+          processedAt,
           remarks,
           referenceId,
           referenceType,
@@ -190,27 +210,41 @@ async function updateWalletBalance({
 
 async function creditWallet({
   userId,
+  walletId,
   amount,
   transactionType,
+  transactionStatus,
   remarks,
   referenceId,
   referenceType,
   gatewayPaymentId,
   providerRefundId,
   originalTransactionId,
+  clientRequestId,
+  upiId,
+  upiApp,
+  processedBy,
+  processedAt,
   phone,
   session,
 } = {}) {
   return updateWalletBalance({
     userId,
+    walletId,
     amount,
     transactionType,
+    transactionStatus,
     remarks,
     referenceId,
     referenceType,
     gatewayPaymentId,
     providerRefundId,
     originalTransactionId,
+    clientRequestId,
+    upiId,
+    upiApp,
+    processedBy,
+    processedAt,
     phone,
     session,
     isCredit: true,
@@ -219,31 +253,85 @@ async function creditWallet({
 
 async function debitWallet({
   userId,
+  walletId,
   amount,
   transactionType,
+  transactionStatus,
   remarks,
   referenceId,
   referenceType,
   gatewayPaymentId,
   providerRefundId,
   originalTransactionId,
+  clientRequestId,
+  upiId,
+  upiApp,
+  processedBy,
+  processedAt,
   phone,
   session,
 } = {}) {
   return updateWalletBalance({
     userId,
+    walletId,
     amount,
     transactionType,
+    transactionStatus,
     remarks,
     referenceId,
     referenceType,
     gatewayPaymentId,
     providerRefundId,
     originalTransactionId,
+    clientRequestId,
+    upiId,
+    upiApp,
+    processedBy,
+    processedAt,
     phone,
     session,
     isCredit: false,
   });
+}
+
+async function getSuccessfulMatchEntry({
+  walletTransactionId,
+  userId,
+  matchId,
+  transactionType,
+  amount,
+  session,
+}) {
+  validateUserId(userId);
+  validateUserId(matchId);
+  if (!mongoose.isValidObjectId(walletTransactionId)) {
+    throw createWalletError("Original match entry debit is missing", 409);
+  }
+  validateTransactionType(transactionType);
+  validateAmount(amount);
+  if (!session) throw createWalletError("A MongoDB session is required", 400);
+
+  const wallet = await Wallet.findOne({ userId }).select("_id").session(session);
+  const entry = wallet
+    ? await WalletTransaction.findOne({
+        _id: walletTransactionId,
+        walletId: wallet._id,
+        userId,
+        transactionType,
+        referenceType: "MATCH",
+        referenceId: matchId.toString(),
+        status: TRANSACTION_STATUS.SUCCESS,
+      }).session(session)
+    : null;
+
+  if (!entry || roundMoney(entry.amount) !== roundMoney(amount)) {
+    throw createWalletError(
+      "Original match entry debit is missing or does not match the entry amount",
+      409
+    );
+  }
+
+  return entry;
 }
 
 async function creditPendingAddMoney({
@@ -375,6 +463,7 @@ module.exports = {
   createWallet,
   creditWallet,
   debitWallet,
+  getSuccessfulMatchEntry,
   creditPendingAddMoney,
   getTransactions,
 };

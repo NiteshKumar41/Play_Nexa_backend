@@ -96,7 +96,7 @@ A Game is a catalog entry such as Ludo. A Match is one 1v1 session for a selecte
 
 All matchmaking endpoints require a valid JWT:
 
-- `POST /api/v1/matches` with `{ "gameId": "...", "entryFee": 50 }` creates an `ACTIVE` match. The game must be active and open, the user must be active and unblocked, and the entry fee must be a positive number.
+- `POST /api/v1/matches` with `{ "gameId": "...", "entryFee": 50, "clientRequestId": "..." }` creates an `ACTIVE` match. The game must be active and open, the user must be active and unblocked, and the entry fee must be a positive number. The server normalizes the fee to currency precision; reusing the same request ID for the same authenticated user and normalized amount returns the existing match, while a different amount is rejected.
 - `GET /api/v1/matches?gameId=...&page=1&limit=10` returns the newest open matches for a game. Only `ACTIVE` matches without a second player appear.
 - `GET /api/v1/matches/:matchId` returns match details, including the room code, without exposing wallet transaction IDs.
 - `POST /api/v1/matches/:matchId/join` joins an `ACTIVE` match. The backend charges Player 2 the exact same amount Player 1 paid. A game must still be active, but it may have been closed to new matches after the creator made this one.

@@ -58,6 +58,7 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
   let players;
   let tokens;
   let game;
+  let matchRequestSequence = 0;
   let activePaymentMethod;
   const uploadedFiles = {
     deposit: [],
@@ -110,11 +111,15 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
     return result.data.data;
   }
 
-  async function createMatch(playerIndex, entryFee = 50) {
+  async function createMatch(
+    playerIndex,
+    entryFee = 50,
+    clientRequestId = `integration-match-${++matchRequestSequence}`
+  ) {
     const result = await api("/api/v1/matches", {
       token: tokens[playerIndex],
       method: "POST",
-      body: { gameId: game._id.toString(), entryFee },
+      body: { gameId: game._id.toString(), entryFee, clientRequestId },
     });
     return result;
   }
@@ -819,6 +824,12 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
         }),
         1
       );
+      const createLedger = await WalletTransaction.findOne({
+        userId: players[0]._id,
+        transactionType: "GAME_CREATE",
+        referenceId: matchId,
+      }).lean();
+      assert.equal(createLedger.referenceType, "MATCH");
       assert.equal(matchResponse.data.data.match.status, "ACTIVE");
 
       const insufficientPlayer = await Wallet.findOne({ userId: players[2]._id });
@@ -844,6 +855,12 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
       assert.equal(joinAttempt.data.data.match.status, "JOINED");
       assert.ok(joinAttempt.data.data.match.joinedAt);
       assert.equal((await Wallet.findById(joinerWallet._id)).balance, 450);
+      const joinLedger = await WalletTransaction.findOne({
+        userId: players[1]._id,
+        transactionType: "GAME_JOIN",
+        referenceId: matchId,
+      }).lean();
+      assert.equal(joinLedger.referenceType, "MATCH");
       const simultaneousJoinMatch = await createMatch(0);
       assert.equal(simultaneousJoinMatch.response.status, 201);
       const simultaneousId = simultaneousJoinMatch.data.data.match.id;
@@ -915,6 +932,7 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
       const leaveMatchId = leaveMatch.data.data.match.id;
       const beforeJoinLeaveBalance = (await Wallet.findById(joinerWallet._id)).balance;
       assert.equal((await joinMatch(1, leaveMatchId)).response.status, 200);
+      const joinedLeaveMatch = await GameMatch.findById(leaveMatchId).lean();
       const leaveResponse = await api(`/api/v1/matches/${leaveMatchId}/leave`, {
         token: tokens[1],
         method: "POST",
@@ -925,9 +943,24 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
       assert.equal(leaveResponse.data.data.match.player2, null);
       assert.equal((await Wallet.findById(joinerWallet._id)).balance, beforeJoinLeaveBalance);
       assert.equal(beforeJoinLeaveBalance, balanceAfterFailedLeave);
+      const leaveRefund = await WalletTransaction.findOne({
+        userId: players[1]._id,
+        transactionType: "GAME_REFUND",
+        referenceType: "MATCH_REFUND",
+        referenceId: leaveMatchId,
+      }).lean();
+      assert.ok(leaveRefund);
+      assert.equal(leaveRefund.amount, 50);
+      const originalJoin = await WalletTransaction.findById(
+        joinedLeaveMatch.walletTransactionIdPlayer2
+      ).lean();
+      assert.equal(originalJoin.transactionType, "GAME_JOIN");
+      assert.equal(originalJoin.referenceType, "MATCH");
+      assert.equal(originalJoin.referenceId, leaveMatchId);
 
       const cancelMatch = await createMatch(0);
       const cancelId = cancelMatch.data.data.match.id;
+      const cancelledMatchBefore = await GameMatch.findById(cancelId).lean();
       const cancel = await api(`/api/v1/matches/${cancelId}/cancel`, {
         token: tokens[0],
         method: "POST",
@@ -935,6 +968,19 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
       });
       assert.equal(cancel.response.status, 200);
       assert.equal(cancel.data.data.match.status, "CANCELLED");
+      const cancelRefund = await WalletTransaction.findOne({
+        userId: players[0]._id,
+        transactionType: "GAME_REFUND",
+        referenceType: "MATCH_REFUND",
+        referenceId: cancelId,
+      }).lean();
+      assert.ok(cancelRefund);
+      const originalCreate = await WalletTransaction.findById(
+        cancelledMatchBefore.walletTransactionIdPlayer1
+      ).lean();
+      assert.equal(originalCreate.transactionType, "GAME_CREATE");
+      assert.equal(originalCreate.referenceType, "MATCH");
+      assert.equal(originalCreate.referenceId, cancelId);
       const joinedMatch = await createMatch(0);
       assert.equal((await joinMatch(1, joinedMatch.data.data.match.id)).response.status, 200);
       const cancelAfterJoin = await api(
@@ -946,6 +992,168 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
         }
       );
       assert.equal(cancelAfterJoin.response.status, 400);
+    });
+
+    it("normalizes match amounts and reuses creation requests by authenticated user and request ID", async () => {
+      const creatorWallet = await Wallet.findOne({ userId: players[0]._id });
+      const joinerWallet = await Wallet.findOne({ userId: players[1]._id });
+      await Wallet.updateOne({ _id: creatorWallet._id }, { $set: { balance: 500 } });
+      await Wallet.updateOne({ _id: joinerWallet._id }, { $set: { balance: 500 } });
+
+      const clientRequestId = "match-normalization-idempotency";
+      const first = await createMatch(0, 50.005, clientRequestId);
+      assert.equal(first.response.status, 201);
+      const matchId = first.data.data.match.id;
+      assert.equal(first.data.data.match.player1Amount, 50.01);
+      assert.equal((await Wallet.findById(creatorWallet._id)).balance, 449.99);
+
+      const createLedger = await WalletTransaction.findOne({
+        userId: players[0]._id,
+        transactionType: "GAME_CREATE",
+        referenceType: "MATCH",
+        referenceId: matchId,
+      }).lean();
+      assert.ok(createLedger);
+      assert.equal(createLedger.amount, 50.01);
+      assert.equal(createLedger.balanceBefore, 500);
+      assert.equal(createLedger.balanceAfter, 449.99);
+
+      const retry = await createMatch(0, 50.005, clientRequestId);
+      assert.equal(retry.response.status, 201);
+      assert.equal(retry.data.data.match.id, matchId);
+      assert.equal(
+        await GameMatch.countDocuments({ player1: players[0]._id, clientRequestId }),
+        1
+      );
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          userId: players[0]._id,
+          transactionType: "GAME_CREATE",
+          referenceId: matchId,
+        }),
+        1
+      );
+      assert.equal((await Wallet.findById(creatorWallet._id)).balance, 449.99);
+
+      const mismatchedAmount = await createMatch(0, 100, clientRequestId);
+      assert.equal(mismatchedAmount.response.status, 409);
+      assert.equal((await Wallet.findById(creatorWallet._id)).balance, 449.99);
+
+      assert.equal((await joinMatch(1, matchId)).response.status, 200);
+      const joinLedger = await WalletTransaction.findOne({
+        userId: players[1]._id,
+        transactionType: "GAME_JOIN",
+        referenceType: "MATCH",
+        referenceId: matchId,
+      }).lean();
+      assert.ok(joinLedger);
+      assert.equal(joinLedger.amount, 50.01);
+      assert.equal(joinLedger.balanceBefore, 500);
+      assert.equal(joinLedger.balanceAfter, 449.99);
+    });
+
+    it("requires the successful original entry debit before any match refund", async () => {
+      for (const player of players) {
+        await Wallet.updateOne(
+          { userId: player._id },
+          { $set: { balance: 1000 } }
+        );
+      }
+
+      const cancelMatchResult = await createMatch(0);
+      const cancelMatchId = cancelMatchResult.data.data.match.id;
+      const cancelBalanceBefore = (
+        await Wallet.findOne({ userId: players[0]._id })
+      ).balance;
+      await GameMatch.updateOne(
+        { _id: cancelMatchId },
+        { $set: { walletTransactionIdPlayer1: new mongoose.Types.ObjectId() } }
+      );
+
+      const invalidCancel = await api(`/api/v1/matches/${cancelMatchId}/cancel`, {
+        token: tokens[0],
+        method: "POST",
+        body: {},
+      });
+      assert.equal(invalidCancel.response.status, 409);
+      assert.equal(
+        (await Wallet.findOne({ userId: players[0]._id })).balance,
+        cancelBalanceBefore
+      );
+      assert.equal((await GameMatch.findById(cancelMatchId)).status, "ACTIVE");
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          transactionType: "GAME_REFUND",
+          referenceId: cancelMatchId,
+          status: "SUCCESS",
+        }),
+        0
+      );
+
+      const leaveMatchResult = await createMatch(0);
+      const leaveMatchId = leaveMatchResult.data.data.match.id;
+      assert.equal((await joinMatch(1, leaveMatchId)).response.status, 200);
+      const leaveBalanceBefore = (
+        await Wallet.findOne({ userId: players[1]._id })
+      ).balance;
+      await GameMatch.updateOne(
+        { _id: leaveMatchId },
+        { $set: { walletTransactionIdPlayer2: new mongoose.Types.ObjectId() } }
+      );
+
+      const invalidLeave = await api(`/api/v1/matches/${leaveMatchId}/leave`, {
+        token: tokens[1],
+        method: "POST",
+        body: {},
+      });
+      assert.equal(invalidLeave.response.status, 409);
+      assert.equal(
+        (await Wallet.findOne({ userId: players[1]._id })).balance,
+        leaveBalanceBefore
+      );
+      assert.equal((await GameMatch.findById(leaveMatchId)).status, "JOINED");
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          transactionType: "GAME_REFUND",
+          referenceId: leaveMatchId,
+          status: "SUCCESS",
+        }),
+        0
+      );
+
+      const settlementMatchResult = await createMatch(0);
+      const settlementMatchId = settlementMatchResult.data.data.match.id;
+      assert.equal((await joinMatch(1, settlementMatchId)).response.status, 200);
+      const claim = await api(`/api/v1/matches/${settlementMatchId}/result`, {
+        token: tokens[0],
+        method: "POST",
+        form: makeForm({ winnerClaim: "true" }, "screenshot"),
+      });
+      assert.equal(claim.response.status, 200);
+      const claimedMatch = await GameMatch.findById(settlementMatchId).lean();
+      if (claimedMatch.p1Screenshot) {
+        uploadedFiles.result.push(
+          new URL(claimedMatch.p1Screenshot, "http://local").pathname.split("/").at(-1)
+        );
+      }
+      await GameMatch.updateOne(
+        { _id: settlementMatchId },
+        { $set: { walletTransactionIdPlayer1: new mongoose.Types.ObjectId() } }
+      );
+      const settlementRefund = await api(
+        `/api/v1/admin/matches/${settlementMatchId}/refund`,
+        { token: tokens[3], method: "POST", body: {} }
+      );
+      assert.equal(settlementRefund.response.status, 409);
+      assert.equal((await GameMatch.findById(settlementMatchId)).status, "COMPLETED");
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          transactionType: "GAME_REFUND",
+          referenceId: settlementMatchId,
+          status: "SUCCESS",
+        }),
+        0
+      );
     });
 
     it("enforces stored match join deadlines before wallet debit and preserves legacy and concurrent joins", async () => {
@@ -1115,6 +1323,7 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
       const refundMatch = await createMatch(0);
       const refundMatchId = refundMatch.data.data.match.id;
       assert.equal((await joinMatch(1, refundMatchId)).response.status, 200);
+      const refundMatchBeforeSettlement = await GameMatch.findById(refundMatchId).lean();
       const refundClaim = await api(`/api/v1/matches/${refundMatchId}/result`, {
         token: tokens[0],
         method: "POST",
@@ -1143,6 +1352,27 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
       assert.equal(refund.response.status, 200);
       assert.equal((await Wallet.findById(player1Wallet._id)).balance, balancesBeforeRefund[0] + 50);
       assert.equal((await Wallet.findById(player2Wallet._id)).balance, balancesBeforeRefund[1] + 50);
+      const settlementRefunds = await WalletTransaction.find({
+        transactionType: "GAME_REFUND",
+        referenceType: "MATCH_REFUND",
+        referenceId: refundMatchId,
+        status: "SUCCESS",
+      }).sort({ userId: 1 }).lean();
+      assert.equal(settlementRefunds.length, 2);
+      assert.deepEqual(
+        settlementRefunds.map(transaction => transaction.userId.toString()).sort(),
+        [players[0]._id.toString(), players[1]._id.toString()].sort()
+      );
+      const refundCreateEntry = await WalletTransaction.findById(
+        refundMatchBeforeSettlement.walletTransactionIdPlayer1
+      ).lean();
+      const refundJoinEntry = await WalletTransaction.findById(
+        refundMatchBeforeSettlement.walletTransactionIdPlayer2
+      ).lean();
+      assert.equal(refundCreateEntry.transactionType, "GAME_CREATE");
+      assert.equal(refundCreateEntry.referenceType, "MATCH");
+      assert.equal(refundJoinEntry.transactionType, "GAME_JOIN");
+      assert.equal(refundJoinEntry.referenceType, "MATCH");
       assert.equal(
         (
           await api(refundUrl, { token: tokens[3], method: "POST", body: {} })
@@ -1150,6 +1380,404 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
         409
       );
       assert.equal((await GameMatch.findById(refundMatchId)).status, "CANCELLED");
+    });
+
+    it("blocks GAME_WIN after a player refund and preserves settlement duplicate guards", async () => {
+      for (const player of players) {
+        await Wallet.updateOne(
+          { userId: player._id },
+          { $set: { balance: 1000 } }
+        );
+      }
+
+      async function createCompletedMatch(winnerIndex) {
+        const created = await createMatch(0);
+        assert.equal(created.response.status, 201);
+        const matchId = created.data.data.match.id;
+        assert.equal((await joinMatch(1, matchId)).response.status, 200);
+
+        const claim = await api(`/api/v1/matches/${matchId}/result`, {
+          token: tokens[winnerIndex],
+          method: "POST",
+          form: makeForm({ winnerClaim: "true" }, "screenshot"),
+        });
+        assert.equal(claim.response.status, 200);
+        const savedMatch = await GameMatch.findById(matchId).lean();
+        for (const screenshot of [savedMatch.p1Screenshot, savedMatch.p2Screenshot]) {
+          if (screenshot) {
+            uploadedFiles.result.push(
+              new URL(screenshot, "http://local").pathname.split("/").at(-1)
+            );
+          }
+        }
+        return { matchId, savedMatch };
+      }
+
+      const refundedWinnerMatch = await createCompletedMatch(0);
+      const refundedWinnerWallet = await Wallet.findOne({
+        userId: players[0]._id,
+      });
+      const refundedWinnerBalance = refundedWinnerWallet.balance;
+      await WalletTransaction.create({
+        walletId: refundedWinnerWallet._id,
+        userId: players[0]._id,
+        phone: players[0].phone,
+        transactionType: "GAME_REFUND",
+        amount: 50,
+        balanceBefore: refundedWinnerBalance,
+        balanceAfter: refundedWinnerBalance + 50,
+        status: "SUCCESS",
+        remarks: "Test match refund",
+        referenceType: "MATCH_REFUND",
+        referenceId: refundedWinnerMatch.matchId,
+      });
+
+      const refundBlocked = await api(
+        `/api/v1/admin/matches/${refundedWinnerMatch.matchId}/declare-winner`,
+        {
+          token: tokens[3],
+          method: "POST",
+          body: { winnerPlayerId: players[0]._id.toString() },
+        }
+      );
+      assert.equal(refundBlocked.response.status, 409);
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          transactionType: "GAME_WIN",
+          referenceType: "MATCH_SETTLEMENT",
+          referenceId: refundedWinnerMatch.matchId,
+          status: "SUCCESS",
+        }),
+        0
+      );
+      assert.equal(
+        (await Wallet.findById(refundedWinnerWallet._id)).balance,
+        refundedWinnerBalance
+      );
+      assert.equal(
+        (await GameMatch.findById(refundedWinnerMatch.matchId)).status,
+        "COMPLETED"
+      );
+
+      const otherParticipantRefundMatch = await createCompletedMatch(0);
+      const otherParticipantWallet = await Wallet.findOne({
+        userId: players[1]._id,
+      });
+      await WalletTransaction.create({
+        walletId: otherParticipantWallet._id,
+        userId: players[1]._id,
+        phone: players[1].phone,
+        transactionType: "GAME_REFUND",
+        amount: 50,
+        balanceBefore: otherParticipantWallet.balance,
+        balanceAfter: otherParticipantWallet.balance + 50,
+        status: "SUCCESS",
+        remarks: "Test other participant refund",
+        referenceType: "MATCH_REFUND",
+        referenceId: otherParticipantRefundMatch.matchId,
+      });
+      const otherParticipantWinnerWallet = await Wallet.findOne({
+        userId: players[0]._id,
+      });
+      const otherParticipantWinnerBalance = otherParticipantWinnerWallet.balance;
+      const otherParticipantRefundBlocked = await api(
+        `/api/v1/admin/matches/${otherParticipantRefundMatch.matchId}/declare-winner`,
+        {
+          token: tokens[3],
+          method: "POST",
+          body: { winnerPlayerId: players[0]._id.toString() },
+        }
+      );
+      assert.equal(otherParticipantRefundBlocked.response.status, 409);
+      assert.equal(
+        (await Wallet.findById(otherParticipantWinnerWallet._id)).balance,
+        otherParticipantWinnerBalance
+      );
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          transactionType: "GAME_WIN",
+          referenceType: "MATCH_SETTLEMENT",
+          referenceId: otherParticipantRefundMatch.matchId,
+          status: "SUCCESS",
+        }),
+        0
+      );
+
+      const duplicateWinnerMatch = await createCompletedMatch(1);
+      const duplicateWinnerWallet = await Wallet.findOne({
+        userId: players[1]._id,
+      });
+      const duplicateWinnerBalance = duplicateWinnerWallet.balance;
+      await WalletTransaction.create({
+        walletId: duplicateWinnerWallet._id,
+        userId: players[1]._id,
+        phone: players[1].phone,
+        transactionType: "GAME_WIN",
+        amount: 80,
+        balanceBefore: duplicateWinnerBalance,
+        balanceAfter: duplicateWinnerBalance + 80,
+        status: "SUCCESS",
+        remarks: "Test existing winner payout",
+        referenceType: "MATCH_SETTLEMENT",
+        referenceId: duplicateWinnerMatch.matchId,
+      });
+
+      const duplicateBlocked = await api(
+        `/api/v1/admin/matches/${duplicateWinnerMatch.matchId}/declare-winner`,
+        {
+          token: tokens[3],
+          method: "POST",
+          body: { winnerPlayerId: players[1]._id.toString() },
+        }
+      );
+      assert.equal(duplicateBlocked.response.status, 409);
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          transactionType: "GAME_WIN",
+          referenceType: "MATCH_SETTLEMENT",
+          referenceId: duplicateWinnerMatch.matchId,
+          status: "SUCCESS",
+        }),
+        1
+      );
+      assert.equal(
+        (await Wallet.findById(duplicateWinnerWallet._id)).balance,
+        duplicateWinnerBalance
+      );
+      assert.equal(
+        (await GameMatch.findById(duplicateWinnerMatch.matchId)).status,
+        "COMPLETED"
+      );
+    });
+
+    it("keeps leave refunds and settlement payouts mutually exclusive", async () => {
+      for (const player of players) {
+        await Wallet.updateOne(
+          { userId: player._id },
+          { $set: { balance: 1000 } }
+        );
+      }
+
+      async function createCompletedMatch(winnerIndex) {
+        const created = await createMatch(0);
+        assert.equal(created.response.status, 201);
+        const matchId = created.data.data.match.id;
+        assert.equal((await joinMatch(1, matchId)).response.status, 200);
+
+        const claim = await api(`/api/v1/matches/${matchId}/result`, {
+          token: tokens[winnerIndex],
+          method: "POST",
+          form: makeForm({ winnerClaim: "true" }, "screenshot"),
+        });
+        assert.equal(claim.response.status, 200);
+        const savedMatch = await GameMatch.findById(matchId).lean();
+        for (const screenshot of [savedMatch.p1Screenshot, savedMatch.p2Screenshot]) {
+          if (screenshot) {
+            uploadedFiles.result.push(
+              new URL(screenshot, "http://local").pathname.split("/").at(-1)
+            );
+          }
+        }
+        return matchId;
+      }
+
+      const leaveMatch = await createMatch(0);
+      const leaveMatchId = leaveMatch.data.data.match.id;
+      assert.equal((await joinMatch(1, leaveMatchId)).response.status, 200);
+      assert.equal(
+        (
+          await api(`/api/v1/matches/${leaveMatchId}/leave`, {
+            token: tokens[1],
+            method: "POST",
+            body: {},
+          })
+        ).response.status,
+        200
+      );
+      const leaveRefunds = await WalletTransaction.find({
+        userId: players[1]._id,
+        transactionType: "GAME_REFUND",
+        referenceId: leaveMatchId,
+        status: "SUCCESS",
+      }).lean();
+      assert.equal(leaveRefunds.length, 1);
+      assert.equal(leaveRefunds[0].referenceType, "MATCH_REFUND");
+
+      const duplicateLeave = await api(`/api/v1/matches/${leaveMatchId}/leave`, {
+        token: tokens[1],
+        method: "POST",
+        body: {},
+      });
+      assert.equal(duplicateLeave.response.status, 403);
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          userId: players[1]._id,
+          transactionType: "GAME_REFUND",
+          referenceId: leaveMatchId,
+          status: "SUCCESS",
+        }),
+        1
+      );
+
+      const rejoin = await joinMatch(1, leaveMatchId);
+      assert.equal(rejoin.response.status, 200);
+      const balanceBeforeDuplicateRefund = (
+        await Wallet.findOne({ userId: players[1]._id })
+      ).balance;
+      const duplicateRefundLeave = await api(
+        `/api/v1/matches/${leaveMatchId}/leave`,
+        {
+          token: tokens[1],
+          method: "POST",
+          body: {},
+        }
+      );
+      assert.equal(duplicateRefundLeave.response.status, 409);
+      assert.equal(
+        (await Wallet.findOne({ userId: players[1]._id })).balance,
+        balanceBeforeDuplicateRefund
+      );
+      assert.equal((await GameMatch.findById(leaveMatchId)).status, "JOINED");
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          userId: players[1]._id,
+          transactionType: "GAME_REFUND",
+          referenceId: leaveMatchId,
+          status: "SUCCESS",
+        }),
+        1
+      );
+
+      const refundedThenRejoinedMatchId = await createMatch(0).then(
+        result => result.data.data.match.id
+      );
+      assert.equal((await joinMatch(1, refundedThenRejoinedMatchId)).response.status, 200);
+      assert.equal(
+        (
+          await api(`/api/v1/matches/${refundedThenRejoinedMatchId}/leave`, {
+            token: tokens[1],
+            method: "POST",
+            body: {},
+          })
+        ).response.status,
+        200
+      );
+      assert.equal((await joinMatch(1, refundedThenRejoinedMatchId)).response.status, 200);
+      const refundedWinnerBalance = (
+        await Wallet.findOne({ userId: players[1]._id })
+      ).balance;
+      const refundedThenRejoinedClaim = await api(
+        `/api/v1/matches/${refundedThenRejoinedMatchId}/result`,
+        {
+          token: tokens[1],
+          method: "POST",
+          form: makeForm({ winnerClaim: "true" }, "screenshot"),
+        }
+      );
+      assert.equal(refundedThenRejoinedClaim.response.status, 200);
+      const refundedThenRejoinedMatch = await GameMatch.findById(
+        refundedThenRejoinedMatchId
+      ).lean();
+      uploadedFiles.result.push(
+        new URL(
+          refundedThenRejoinedMatch.p2Screenshot,
+          "http://local"
+        ).pathname.split("/").at(-1)
+      );
+      const leaveRefundWinner = await api(
+        `/api/v1/admin/matches/${refundedThenRejoinedMatchId}/declare-winner`,
+        {
+          token: tokens[3],
+          method: "POST",
+          body: { winnerPlayerId: players[1]._id.toString() },
+        }
+      );
+      assert.equal(leaveRefundWinner.response.status, 409);
+      assert.equal(
+        (await Wallet.findOne({ userId: players[1]._id })).balance,
+        refundedWinnerBalance
+      );
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          userId: players[1]._id,
+          transactionType: "GAME_WIN",
+          referenceType: "MATCH_SETTLEMENT",
+          referenceId: refundedThenRejoinedMatchId,
+          status: "SUCCESS",
+        }),
+        0
+      );
+      assert.equal(
+        (await GameMatch.findById(refundedThenRejoinedMatchId)).status,
+        "COMPLETED"
+      );
+
+      const existingRefundMatchId = await createCompletedMatch(0);
+      const existingRefundWallet = await Wallet.findOne({ userId: players[0]._id });
+      await WalletTransaction.create({
+        walletId: existingRefundWallet._id,
+        userId: players[0]._id,
+        phone: players[0].phone,
+        transactionType: "GAME_REFUND",
+        amount: 50,
+        balanceBefore: existingRefundWallet.balance,
+        balanceAfter: existingRefundWallet.balance + 50,
+        status: "SUCCESS",
+        remarks: "Test match refund",
+        referenceType: "MATCH_REFUND",
+        referenceId: existingRefundMatchId,
+      });
+      const refundAfterExistingRefund = await api(
+        `/api/v1/admin/matches/${existingRefundMatchId}/refund`,
+        { token: tokens[3], method: "POST", body: {} }
+      );
+      assert.equal(refundAfterExistingRefund.response.status, 409);
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          transactionType: "GAME_REFUND",
+          referenceType: "MATCH_REFUND",
+          referenceId: existingRefundMatchId,
+          status: "SUCCESS",
+        }),
+        1
+      );
+      assert.equal((await GameMatch.findById(existingRefundMatchId)).status, "COMPLETED");
+
+      const existingWinMatchId = await createCompletedMatch(0);
+      const existingWinWallet = await Wallet.findOne({ userId: players[0]._id });
+      await WalletTransaction.create({
+        walletId: existingWinWallet._id,
+        userId: players[0]._id,
+        phone: players[0].phone,
+        transactionType: "GAME_WIN",
+        amount: 80,
+        balanceBefore: existingWinWallet.balance,
+        balanceAfter: existingWinWallet.balance + 80,
+        status: "SUCCESS",
+        remarks: "Test existing winner payout",
+        referenceType: "MATCH_SETTLEMENT",
+        referenceId: existingWinMatchId,
+      });
+      const existingWinBalance = existingWinWallet.balance;
+      const refundAfterExistingWin = await api(
+        `/api/v1/admin/matches/${existingWinMatchId}/refund`,
+        { token: tokens[3], method: "POST", body: {} }
+      );
+      assert.equal(refundAfterExistingWin.response.status, 409);
+      assert.equal(
+        (await Wallet.findOne({ userId: players[0]._id })).balance,
+        existingWinBalance
+      );
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          transactionType: "GAME_REFUND",
+          referenceType: "MATCH_REFUND",
+          referenceId: existingWinMatchId,
+          status: "SUCCESS",
+        }),
+        0
+      );
+      assert.equal((await GameMatch.findById(existingWinMatchId)).status, "COMPLETED");
     });
 
     it("keeps payment method activation unique and protects the last active admin", async () => {

@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
+    "migration:audit": "node scripts/auditWalletTransactionMigration.js",
     "test": "node --test"
   },
   "dependencies": {

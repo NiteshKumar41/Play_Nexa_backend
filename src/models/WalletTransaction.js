@@ -103,7 +103,13 @@ const walletTransactionSchema = new mongoose.Schema(
     },
     referenceType: {
       type: String,
-      enum: ["MATCH_SETTLEMENT", "MATCH_REFUND", "WITHDRAWAL", "ADD_MONEY_REFUND"],
+      enum: [
+        "MATCH",
+        "MATCH_SETTLEMENT",
+        "MATCH_REFUND",
+        "WITHDRAWAL",
+        "ADD_MONEY_REFUND",
+      ],
     },
   },
   {
@@ -123,6 +129,7 @@ walletTransactionSchema.index({
 walletTransactionSchema.index(
   { userId: 1, transactionType: 1, clientRequestId: 1 },
   {
+    name: "walletTransaction_withdraw_clientRequest_unique",
     unique: true,
     partialFilterExpression: {
       transactionType: "WITHDRAW",
@@ -133,6 +140,7 @@ walletTransactionSchema.index(
 walletTransactionSchema.index(
   { userId: 1, transactionType: 1, clientRequestId: 1 },
   {
+    name: "walletTransaction_addMoney_clientRequest_unique",
     unique: true,
     partialFilterExpression: {
       transactionType: "ADD_MONEY",
@@ -144,6 +152,7 @@ walletTransactionSchema.index({ gatewayOrderId: 1 });
 walletTransactionSchema.index(
   { providerRefundId: 1 },
   {
+    name: "walletTransaction_addMoneyRefund_providerRefund_unique",
     unique: true,
     partialFilterExpression: {
       transactionType: "ADD_MONEY_REFUND",
@@ -154,6 +163,7 @@ walletTransactionSchema.index(
 walletTransactionSchema.index(
   { userId: 1, transactionType: 1, upiTransactionId: 1 },
   {
+    name: "walletTransaction_addMoney_upiTransaction_unique",
     unique: true,
     partialFilterExpression: {
       transactionType: "ADD_MONEY",
@@ -165,6 +175,7 @@ walletTransactionSchema.index({ referenceType: 1, referenceId: 1 });
 walletTransactionSchema.index(
   { transactionType: 1, referenceType: 1, referenceId: 1 },
   {
+    name: "walletTransaction_gameWin_matchSettlement_unique",
     unique: true,
     partialFilterExpression: {
       transactionType: "GAME_WIN",
@@ -176,6 +187,7 @@ walletTransactionSchema.index(
 walletTransactionSchema.index(
   { userId: 1, transactionType: 1, referenceType: 1, referenceId: 1 },
   {
+    name: "walletTransaction_matchRefund_player_unique",
     unique: true,
     partialFilterExpression: {
       transactionType: "GAME_REFUND",
@@ -187,6 +199,7 @@ walletTransactionSchema.index(
 walletTransactionSchema.index(
   { transactionType: 1, referenceType: 1, referenceId: 1 },
   {
+    name: "walletTransaction_withdrawRefund_withdrawal_unique",
     unique: true,
     partialFilterExpression: {
       transactionType: "WITHDRAW_REFUND",

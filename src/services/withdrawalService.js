@@ -1,11 +1,11 @@
 const mongoose = require("mongoose");
 const User = require("../models/User");
-const Wallet = require("../models/Wallet");
 const WalletTransaction = require("../models/WalletTransaction");
 const { TRANSACTION_STATUS } = require("../constants/transactionStatus");
 const { TRANSACTION_TYPE } = require("../constants/transactionTypes");
-const { addMoney, roundMoney, subtractMoney } = require("../utils/money");
+const { roundMoney } = require("../utils/money");
 const dateUtils = require("../utils/date");
+const walletService = require("./walletService");
 
 const WITHDRAWAL_STATUSES = [
   TRANSACTION_STATUS.INITIATED,
@@ -229,53 +229,23 @@ async function createWithdrawal(userId, requestData) {
         return;
       }
 
-      const wallet = await Wallet.findOne({ userId }).session(session);
-      if (!wallet) throw createWithdrawalError("Wallet not found", 404);
-
-      const balanceBefore = roundMoney(wallet.balance);
-      let balanceAfter;
-      try {
-        balanceAfter = subtractMoney(balanceBefore, amount);
-      } catch (error) {
-        throw createWithdrawalError("Wallet balance is outside the supported range", 400);
+      const walletChange = await walletService.debitWallet({
+        userId,
+        amount,
+        transactionType: TRANSACTION_TYPE.WITHDRAW,
+        transactionStatus: TRANSACTION_STATUS.INITIATED,
+        upiId,
+        upiApp,
+        clientRequestId,
+        phone: user.phone,
+        remarks: "Withdrawal initiated",
+        session,
+      });
+      withdrawal = await WalletTransaction.findById(walletChange.transactionId)
+        .session(session);
+      if (!withdrawal) {
+        throw createWithdrawalError("Withdrawal ledger entry was not created", 500);
       }
-      if (balanceAfter < 0) {
-        throw createWithdrawalError("Insufficient wallet balance", 400);
-      }
-
-      const updatedWallet = await Wallet.findOneAndUpdate(
-        {
-          _id: wallet._id,
-          userId,
-          balance: { $eq: wallet.balance, $gte: amount },
-        },
-        { $set: { balance: balanceAfter } },
-        { new: true, runValidators: true, session }
-      );
-      if (!updatedWallet) {
-        throw createWithdrawalError("Insufficient wallet balance", 400);
-      }
-
-      const [createdWithdrawal] = await WalletTransaction.create(
-        [
-          {
-            walletId: wallet._id,
-            userId,
-            phone: user.phone,
-            transactionType: TRANSACTION_TYPE.WITHDRAW,
-            amount,
-            balanceBefore,
-            balanceAfter,
-            status: TRANSACTION_STATUS.INITIATED,
-            upiId,
-            upiApp,
-            clientRequestId,
-            remarks: "Withdrawal initiated",
-          },
-        ],
-        { session }
-      );
-      withdrawal = createdWithdrawal;
     });
   } catch (error) {
     if (error.code === 11000 && clientRequestId) {
@@ -545,39 +515,6 @@ async function rejectWithdrawal(transactionId, adminId, reason) {
         );
       }
 
-      const wallet = await Wallet.findOne({
-        _id: withdrawal.walletId,
-        userId: withdrawal.userId,
-      }).session(session);
-      if (!wallet) throw createWithdrawalError("Wallet not found", 404);
-
-      const balanceBefore = roundMoney(wallet.balance);
-      let balanceAfter;
-      try {
-        balanceAfter = addMoney(balanceBefore, withdrawal.amount);
-      } catch (error) {
-        throw createWithdrawalError(
-          "Wallet balance is outside the supported range",
-          400
-        );
-      }
-
-      const updatedWallet = await Wallet.findOneAndUpdate(
-        {
-          _id: wallet._id,
-          userId: withdrawal.userId,
-          balance: wallet.balance,
-        },
-        { $set: { balance: balanceAfter } },
-        { new: true, runValidators: true, session }
-      );
-      if (!updatedWallet) {
-        throw createWithdrawalError(
-          "Wallet changed during refund; retry the request",
-          409
-        );
-      }
-
       const processedAt = new Date();
       const updatedWithdrawal = await WalletTransaction.findOneAndUpdate(
         {
@@ -602,26 +539,19 @@ async function rejectWithdrawal(transactionId, adminId, reason) {
         );
       }
 
-      await WalletTransaction.create(
-        [
-          {
-            walletId: wallet._id,
-            userId: withdrawal.userId,
-            phone: withdrawal.phone,
-            transactionType: TRANSACTION_TYPE.WITHDRAW_REFUND,
-            amount: withdrawal.amount,
-            balanceBefore,
-            balanceAfter,
-            status: TRANSACTION_STATUS.SUCCESS,
-            processedBy: adminId,
-            processedAt,
-            remarks: `Refund for rejected withdrawal: ${reason.trim()}`,
-            referenceType: "WITHDRAWAL",
-            referenceId: withdrawal._id.toString(),
-          },
-        ],
-        { session }
-      );
+      await walletService.creditWallet({
+        walletId: withdrawal.walletId,
+        userId: withdrawal.userId,
+        phone: withdrawal.phone,
+        amount: withdrawal.amount,
+        transactionType: TRANSACTION_TYPE.WITHDRAW_REFUND,
+        remarks: `Refund for rejected withdrawal: ${reason.trim()}`,
+        referenceType: "WITHDRAWAL",
+        referenceId: withdrawal._id.toString(),
+        processedBy: adminId,
+        processedAt,
+        session,
+      });
 
       result = {
         transactionId: updatedWithdrawal._id.toString(),

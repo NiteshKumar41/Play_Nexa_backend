@@ -46,7 +46,7 @@ app.use(
     parameterLimit: 1000,
   })
 );
-app.use("/api/v1", apiRateLimiter);
+// app.use("/api/v1", apiRateLimiter);
 
 function sendHealthResponse(request, response) {
   response.json({

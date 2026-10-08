@@ -21,16 +21,16 @@ app.use(
   })
 );
 app.use(requestContextMiddleware);
-app.use(
-  cors({
-    origin(origin, callback) {
-      if (isAllowedOrigin(origin)) return callback(null, true);
-      const error = new Error("Origin is not allowed by CORS");
-      error.statusCode = 403;
-      return callback(error);
-    },
-  })
-);
+// app.use(
+//   cors({
+//     origin(origin, callback) {
+//       if (isAllowedOrigin(origin)) return callback(null, true);
+//       const error = new Error("Origin is not allowed by CORS");
+//       error.statusCode = 403;
+//       return callback(error);
+//     },
+//   })
+// );
 app.use(express.json({
   limit: "1mb",
   verify(request, response, buffer) {

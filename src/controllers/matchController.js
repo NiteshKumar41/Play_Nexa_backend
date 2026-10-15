@@ -80,7 +80,8 @@ async function setRoomCode(request, response, next) {
     const match = await matchService.setRoomCode(
       request.params.matchId,
       request.user.id,
-      request.body?.roomCode
+      request.body?.roomCode,
+      request.body?.replaceExisting
     );
     emitRoomCodeUpdated(match);
 

@@ -108,9 +108,9 @@ All matchmaking endpoints require a valid JWT:
 
 - `POST /api/v1/matches` with `{ "gameId": "...", "entryFee": 50, "clientRequestId": "..." }` creates an `ACTIVE` match. The game must be active and open, the user must be active and unblocked, and the entry fee must be a positive number. The server normalizes the fee to currency precision; reusing the same request ID for the same authenticated user and normalized amount returns the existing match, while a different amount is rejected.
 - `GET /api/v1/matches?gameId=...&page=1&limit=10` returns the newest open matches for a game. Only `ACTIVE` matches without a second player appear.
-- `GET /api/v1/matches/:matchId` returns match details, including the room code, without exposing wallet transaction IDs.
+- `GET /api/v1/matches/:matchId` returns match details, including the room code only to the two match participants, without exposing wallet transaction IDs. Admins retain access to the separate evidence/settlement review data but do not receive the room code from this player match endpoint.
 - `POST /api/v1/matches/:matchId/join` joins an `ACTIVE` match. The backend charges Player 2 the exact same amount Player 1 paid. A game must still be active, but it may have been closed to new matches after the creator made this one.
-- `PATCH /api/v1/matches/:matchId/room-code` with `{ "roomCode": "123456" }` lets only Player 1 set a non-empty room code after the match is joined.
+- `PATCH /api/v1/matches/:matchId/room-code` with `{ "roomCode": "123456" }` lets only Player 1 set a printable, non-empty room code after the match is joined. Repeating the saved code is idempotent. Replacing a different saved code requires the explicit `{ "replaceExisting": true }` flag and is still protected by a conditional update so concurrent replacements cannot silently overwrite one another.
 - `POST /api/v1/matches/:matchId/leave` lets Player 2 leave and receive a full refund only before a room code is set.
 - `POST /api/v1/matches/:matchId/cancel` lets Player 1 cancel and receive a full refund only while the match is active and no opponent has joined.
 
@@ -258,7 +258,7 @@ Socket.IO runs on the same HTTP server as Express. The browser authenticates the
 
 REST performs operations and provides the initial page data. MongoDB stores the authoritative match and wallet state. After a REST operation has completed successfully, Socket.IO tells connected clients about the change:
 
-The lobby first loads matches over REST, then joins `game:lobby:<gameId>` and listens for `match_created`, `match_joined`, `match_cancelled`, and `match_player_left`. The detail page loads via REST, then joins the private `match:<matchId>` room and listens for `match_updated`, `room_code_updated`, cancellation, and leave updates. If the socket reconnects, the client rejoins its active rooms. An unauthorized room request returns `socket_error`; it does not change application data.
+The lobby first loads matches over REST, then joins `game:lobby:<gameId>` and listens for `match_created`, `match_joined`, `match_cancelled`, and `match_player_left`. The detail page loads via REST, then joins the private `match:<matchId>` room and listens for `match_updated`, cancellation, and leave updates; `room_code_updated` is delivered through the authenticated `user:<userId>` rooms of the current participants. Stale match-room membership therefore cannot receive a later code. If the socket reconnects, the client rejoins its active rooms. An unauthorized room request returns `socket_error`; it does not change application data.
 
 ```text
 CREATE MATCH
@@ -272,8 +272,8 @@ React → POST /api/v1/matches/:id/join → MongoDB updates match + wallet
                                       → React updates lobby/detail
 
 ROOM CODE
-React → PATCH /api/v1/matches/:id/room-code → MongoDB stores room code
-                                             → Socket.IO: room_code_updated
+React → PATCH /api/v1/matches/:id/room-code → MongoDB conditionally stores room code
+                                             → Socket.IO: participant-only room_code_updated
                                              → React shows room code
 ```
 

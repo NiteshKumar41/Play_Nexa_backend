@@ -22,6 +22,42 @@ function validateObjectId(value, label) {
   }
 }
 
+const MAX_ROOM_CODE_LENGTH = 64;
+
+function validateRoomCode(roomCode) {
+  if (typeof roomCode !== "string" || !roomCode.trim()) {
+    throw createMatchError("Room code is required", 400);
+  }
+
+  const normalizedRoomCode = roomCode.trim();
+
+  if (normalizedRoomCode.length > MAX_ROOM_CODE_LENGTH) {
+    throw createMatchError(
+      `Room code must be ${MAX_ROOM_CODE_LENGTH} characters or fewer`,
+      400
+    );
+  }
+
+  // Ludo King's supported code format is not exposed as a public API
+  // contract. Reject control characters while allowing printable codes so
+  // the PlayNexa workflow does not invent an unsupported format restriction.
+  if (/[\u0000-\u001f\u007f]/.test(normalizedRoomCode)) {
+    throw createMatchError("Room code contains unsupported characters", 400);
+  }
+
+  return normalizedRoomCode;
+}
+
+function validateRoomCodeReplacement(replaceExisting) {
+  if (replaceExisting === undefined) return false;
+
+  if (typeof replaceExisting !== "boolean") {
+    throw createMatchError("replaceExisting must be a boolean", 400);
+  }
+
+  return replaceExisting;
+}
+
 function validateEntryFee(entryFee) {
   if (
     typeof entryFee !== "number" ||
@@ -360,7 +396,7 @@ async function getMatchById(matchId, userId, role) {
 
   return formatMatch(match, game, {
     includeEvidence: canViewPrivateDetails,
-    includeRoomCode: canViewPrivateDetails,
+    includeRoomCode: isParticipant,
   });
 }
 
@@ -473,19 +509,12 @@ async function joinMatch(matchId, userId) {
   }
 }
 
-async function setRoomCode(matchId, userId, roomCode) {
+async function setRoomCode(matchId, userId, roomCode, replaceExisting) {
   validateObjectId(matchId, "match ID");
   validateObjectId(userId, "user");
 
-  if (typeof roomCode !== "string" || !roomCode.trim()) {
-    throw createMatchError("Room code is required", 400);
-  }
-
-  const normalizedRoomCode = roomCode.trim();
-
-  if (normalizedRoomCode.length > 64) {
-    throw createMatchError("Room code must be 64 characters or fewer", 400);
-  }
+  const normalizedRoomCode = validateRoomCode(roomCode);
+  const allowReplacement = validateRoomCodeReplacement(replaceExisting);
 
   const match = await GameMatch.findById(matchId);
 
@@ -501,11 +530,41 @@ async function setRoomCode(matchId, userId, roomCode) {
     throw createMatchError("Room code can only be set after a player joins", 400);
   }
 
+  const currentRoomCode = typeof match.roomCode === "string"
+    ? match.roomCode.trim()
+    : "";
+
+  if (currentRoomCode === normalizedRoomCode) {
+    const game = await Game.findById(match.gameId).select(
+      "_id gameCode name imageUrl"
+    );
+
+    return formatMatch(match, game, { includeRoomCode: true });
+  }
+
+  if (currentRoomCode && !allowReplacement) {
+    throw createMatchError(
+      "A room code is already saved. Confirm an explicit replacement to change it.",
+      409
+    );
+  }
+
+  const roomCodeStateFilter = currentRoomCode
+    ? { roomCode: currentRoomCode }
+    : {
+        $or: [
+          { roomCode: "" },
+          { roomCode: null },
+          { roomCode: { $exists: false } },
+        ],
+      };
+
   const updatedMatch = await GameMatch.findOneAndUpdate(
     {
       _id: matchId,
       player1: userId,
       status: MATCH_STATUS.JOINED,
+      ...roomCodeStateFilter,
     },
     { $set: { roomCode: normalizedRoomCode } },
     { new: true, runValidators: true }
@@ -741,6 +800,7 @@ module.exports = {
   getMatchById,
   joinMatch,
   setRoomCode,
+  validateRoomCode,
   leaveMatch,
   cancelMatch,
 };

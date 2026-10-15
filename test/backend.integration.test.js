@@ -418,6 +418,17 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
       });
       assert.equal(validLogin.response.status, 200);
       assert.ok(validLogin.data.data.token);
+      assert.equal(validLogin.data.data.user.role, "player");
+      const adminLogin = await api("/api/v1/auth/login", {
+        method: "POST",
+        body: { phone: admin.phone, password: "123456" },
+      });
+      assert.equal(adminLogin.response.status, 200);
+      assert.equal(adminLogin.data.data.user.role, "admin");
+      assert.equal(
+        (await api("/api/v1/auth/me", { token: adminLogin.data.data.token })).data.data.user.role,
+        "admin"
+      );
       const wrongPassword = await api("/api/v1/auth/login", {
         method: "POST",
         body: { phone: players[0].phone, password: "654321" },
@@ -935,10 +946,73 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
         body: { roomCode: "987654" },
       });
       assert.equal(roomCode.response.status, 200);
+      assert.equal(
+        (
+          await api(`/api/v1/matches/${matchId}/room-code`, {
+            method: "PATCH",
+            body: { roomCode: "NO-AUTH" },
+          })
+        ).response.status,
+        401
+      );
+      assert.equal(
+        (
+          await api(`/api/v1/matches/${matchId}/room-code`, {
+            token: tokens[0],
+            method: "PATCH",
+            body: { roomCode: "bad\ncode" },
+          })
+        ).response.status,
+        400
+      );
       const playerTwoDetails = await api(`/api/v1/matches/${matchId}`, {
         token: tokens[1],
       });
       assert.equal(playerTwoDetails.data.data.match.roomCode, "987654");
+      const duplicateRoomCode = await api(`/api/v1/matches/${matchId}/room-code`, {
+        token: tokens[0],
+        method: "PATCH",
+        body: { roomCode: " 987654 " },
+      });
+      assert.equal(duplicateRoomCode.response.status, 200);
+      assert.equal(duplicateRoomCode.data.data.match.roomCode, "987654");
+      const unconfirmedReplacement = await api(`/api/v1/matches/${matchId}/room-code`, {
+        token: tokens[0],
+        method: "PATCH",
+        body: { roomCode: "987655" },
+      });
+      assert.equal(unconfirmedReplacement.response.status, 409);
+      assert.equal(
+        (await api(`/api/v1/matches/${matchId}`, { token: tokens[1] })).data.data.match.roomCode,
+        "987654"
+      );
+      const replacement = await api(`/api/v1/matches/${matchId}/room-code`, {
+        token: tokens[0],
+        method: "PATCH",
+        body: { roomCode: "987655", replaceExisting: true },
+      });
+      assert.equal(replacement.response.status, 200);
+      assert.equal(replacement.data.data.match.roomCode, "987655");
+      const concurrentReplacements = await Promise.all([
+        api(`/api/v1/matches/${matchId}/room-code`, {
+          token: tokens[0],
+          method: "PATCH",
+          body: { roomCode: "CONCURRENT-A", replaceExisting: true },
+        }),
+        api(`/api/v1/matches/${matchId}/room-code`, {
+          token: tokens[0],
+          method: "PATCH",
+          body: { roomCode: "CONCURRENT-B", replaceExisting: true },
+        }),
+      ]);
+      assert.equal(
+        concurrentReplacements.filter(result => result.response.status === 200).length,
+        1
+      );
+      assert.equal(
+        concurrentReplacements.filter(result => result.response.status === 409).length,
+        1
+      );
       assert.equal(
         (
           await api(`/api/v1/matches/${matchId}/room-code`, {
@@ -2377,7 +2451,7 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
       const updated = await api(`/api/v1/matches/${matchId}/room-code`, {
         token: tokens[0],
         method: "PATCH",
-        body: { roomCode: "SOCKET-ROOM" },
+        body: { roomCode: "SOCKET-ROOM", replaceExisting: true },
       });
       assert.equal(updated.response.status, 200);
       assert.equal((await roomUpdate).roomCode, "SOCKET-ROOM");

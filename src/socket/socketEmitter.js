@@ -64,12 +64,18 @@ function emitMatchCancelled(match) {
 }
 
 function emitRoomCodeUpdated(match) {
-  getSocketServer()
-    .to(`match:${match.id}`)
-    .emit(SOCKET_EVENTS.ROOM_CODE_UPDATED, {
-      matchId: match.id,
-      roomCode: match.roomCode,
-    });
+  const io = getSocketServer();
+  const payload = {
+    matchId: match.id,
+    roomCode: match.roomCode,
+  };
+
+  // Room codes are private match data. Target the current participants' user
+  // rooms instead of broadcasting to a match room whose membership may be
+  // stale after a player leaves.
+  for (const userId of [match.player1, match.player2]) {
+    if (userId) io.to(`user:${userId}`).emit(SOCKET_EVENTS.ROOM_CODE_UPDATED, payload);
+  }
 }
 
 function emitResultSubmitted(match) {

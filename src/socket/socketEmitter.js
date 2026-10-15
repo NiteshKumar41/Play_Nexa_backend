@@ -30,6 +30,7 @@ function emitMatchJoined(match) {
     player2Name: match.player2Name,
     status: match.status,
     prizePool: match.prizePool,
+    estimatedWinnerPayout: match.estimatedWinnerPayout,
   };
   const io = getSocketServer();
 
@@ -105,6 +106,11 @@ function emitMatchSettled(settlement) {
       matchId: settlement.matchId,
       status: settlement.status,
       winnerUserId: settlement.winnerUserId,
+      grossWinningAmount: settlement.grossWinningAmount,
+      commissionRate: settlement.commissionRate,
+      platformCommission: settlement.platformCommission,
+      referralReward: settlement.referralReward,
+      winnerNetPayout: settlement.winnerNetPayout,
       winnerAmount: settlement.winnerAmount,
     });
 }

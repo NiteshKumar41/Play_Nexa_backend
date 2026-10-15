@@ -29,6 +29,20 @@ const userSchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+    referralCode: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      minlength: 8,
+      maxlength: 32,
+      default: undefined,
+    },
+    referredBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      immutable: true,
+      default: null,
+    },
     password: {
       type: String,
       required: true,
@@ -69,5 +83,14 @@ const userSchema = new mongoose.Schema(
 );
 
 userSchema.index({ role: 1, active: 1, isBlocked: 1 });
+userSchema.index(
+  { referralCode: 1 },
+  {
+    name: "user_referralCode_unique",
+    unique: true,
+    sparse: true,
+  }
+);
+userSchema.index({ referredBy: 1 });
 
 module.exports = mongoose.model("User", userSchema);

@@ -113,6 +113,38 @@ const gameMatchSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    grossWinningAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    commissionRate: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    platformCommission: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    referralReward: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    winnerNetPayout: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    // This is only a pre-settlement estimate. It excludes any referral reward
+    // because the winning user's eligibility is not known until settlement.
+    estimatedWinnerPayout: {
+      type: Number,
+      default: null,
+      min: 0,
+    },
     winnerAmount: {
       type: Number,
       default: 0,
@@ -121,6 +153,16 @@ const gameMatchSchema = new mongoose.Schema(
     winnerTransactionId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "WalletTransaction",
+      default: null,
+    },
+    referralRewardTransactionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "WalletTransaction",
+      default: null,
+    },
+    platformCommissionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "PlatformCommission",
       default: null,
     },
     createdBy: {

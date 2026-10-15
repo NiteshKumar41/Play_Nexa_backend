@@ -7,6 +7,8 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "migration:audit": "node scripts/auditWalletTransactionMigration.js",
+    "settlement:indexes:verify": "node scripts/settlementIndexMigration.js --verify",
+    "settlement:indexes:apply": "node scripts/settlementIndexMigration.js --apply",
     "test": "node --test"
   },
   "dependencies": {

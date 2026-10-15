@@ -2,6 +2,12 @@ const bcrypt = require("bcryptjs");
 const mongoose = require("mongoose");
 const User = require("../models/User");
 const walletService = require("./walletService");
+const {
+  assertNotSelfReferral,
+  ensureReferralCode,
+  generateUniqueReferralCode,
+  normalizeReferralCode,
+} = require("./referralService");
 const { generateToken } = require("../utils/jwt");
 
 const DUMMY_PASSWORD_HASH = bcrypt.hashSync("not-a-real-play-nexa-passcode", 10);
@@ -61,6 +67,7 @@ function getSafeUser(user) {
     fullName: user.fullName,
     phone: user.phone,
     role: user.role,
+    referralCode: user.referralCode || null,
   };
 }
 
@@ -76,6 +83,7 @@ async function registerUser(userData) {
     "dob",
     "gender",
     "upiId",
+    "referralCode",
   ];
   if (Object.keys(userData).some(field => !allowedFields.includes(field))) {
     throw createAuthError("Signup request contains unsupported fields", 400);
@@ -89,10 +97,12 @@ async function registerUser(userData) {
     dob,
     gender,
     upiId,
+    referralCode,
   } = userData;
 
   validateSignupDetails({ fullName, phone, password });
   validateDateOfBirth(dob);
+  const normalizedReferralCode = normalizeReferralCode(referralCode);
 
   if (email !== undefined && email !== "" && typeof email !== "string") {
     throw createAuthError("Email must be a valid email address", 400);
@@ -108,51 +118,70 @@ async function registerUser(userData) {
 
   const normalizedPhone = phone.trim();
   const hashedPassword = await bcrypt.hash(password, 10);
-  let user;
-  let token;
-  const session = await mongoose.startSession();
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    let user;
+    let token;
+    const session = await mongoose.startSession();
 
-  try {
-    await session.withTransaction(async () => {
-      const existingUser = await User.findOne({ phone: normalizedPhone })
-        .session(session);
+    try {
+      await session.withTransaction(async () => {
+        const existingUser = await User.findOne({ phone: normalizedPhone })
+          .session(session);
 
-      if (existingUser) {
+        if (existingUser) {
+          throw createAuthError("Phone number already registered", 409);
+        }
+
+        const referrer = normalizedReferralCode
+          ? await User.findOne({ referralCode: normalizedReferralCode })
+              .select("_id")
+              .session(session)
+          : null;
+        if (normalizedReferralCode && !referrer) {
+          throw createAuthError("Referral code is invalid", 400);
+        }
+
+        [user] = await User.create(
+          [
+            {
+              fullName: fullName.trim(),
+              phone: normalizedPhone,
+              password: hashedPassword,
+              email: normalizedEmail || undefined,
+              dob,
+              gender,
+              upiId,
+              referralCode: await generateUniqueReferralCode(session),
+              referredBy: referrer?._id || null,
+            },
+          ],
+          { session }
+        );
+        assertNotSelfReferral(referrer?._id, user._id);
+
+        await walletService.createWallet(user._id, session);
+        token = generateToken(user);
+      });
+
+      return {
+        user: getSafeUser(user),
+        token,
+      };
+    } catch (error) {
+      const referralCodeCollision =
+        error.code === 11000 &&
+        (error.keyPattern?.referralCode || error.keyValue?.referralCode);
+      if (referralCodeCollision) continue;
+      if (error.code === 11000) {
         throw createAuthError("Phone number already registered", 409);
       }
-
-      [user] = await User.create(
-        [
-          {
-            fullName: fullName.trim(),
-            phone: normalizedPhone,
-            password: hashedPassword,
-            email: normalizedEmail || undefined,
-            dob,
-            gender,
-            upiId,
-          },
-        ],
-        { session }
-      );
-
-      await walletService.createWallet(user._id, session);
-      token = generateToken(user);
-    });
-  } catch (error) {
-    if (error.code === 11000) {
-      throw createAuthError("Phone number already registered", 409);
+      throw error;
+    } finally {
+      await session.endSession();
     }
-
-    throw error;
-  } finally {
-    await session.endSession();
   }
 
-  return {
-    user: getSafeUser(user),
-    token,
-  };
+  throw createAuthError("Unable to generate a unique referral code", 503);
 }
 
 async function loginUser(credentials) {
@@ -185,9 +214,10 @@ async function loginUser(credentials) {
     throw createAuthError(INVALID_LOGIN_MESSAGE, 401);
   }
 
+  const userWithReferralCode = await ensureReferralCode(user._id);
   return {
-    user: getSafeUser(user),
-    token: generateToken(user),
+    user: getSafeUser(userWithReferralCode),
+    token: generateToken(userWithReferralCode),
   };
 }
 
@@ -198,7 +228,8 @@ async function getCurrentUser(userId) {
     throw createAuthError("User account not found", 404);
   }
 
-  return getSafeUser(user);
+  const userWithReferralCode = await ensureReferralCode(user._id);
+  return getSafeUser(userWithReferralCode);
 }
 
 module.exports = {

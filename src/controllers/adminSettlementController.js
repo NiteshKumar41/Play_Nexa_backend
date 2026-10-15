@@ -36,6 +36,11 @@ async function settleMatch(request, response, next) {
           matchId: result.matchId,
           status: result.status,
           winnerUserId: result.winnerUserId,
+          grossWinningAmount: result.grossWinningAmount,
+          commissionRate: result.commissionRate,
+          platformCommission: result.platformCommission,
+          referralReward: result.referralReward,
+          winnerNetPayout: result.winnerNetPayout,
           winnerAmount: result.winnerAmount,
           platformFee: result.platformFee,
         }

@@ -107,6 +107,7 @@ const walletTransactionSchema = new mongoose.Schema(
         "MATCH",
         "MATCH_SETTLEMENT",
         "MATCH_REFUND",
+        "REFERRAL_REWARD",
         "WITHDRAWAL",
         "ADD_MONEY_REFUND",
       ],
@@ -180,6 +181,18 @@ walletTransactionSchema.index(
     partialFilterExpression: {
       transactionType: "GAME_WIN",
       referenceType: "MATCH_SETTLEMENT",
+      status: "SUCCESS",
+    },
+  }
+);
+walletTransactionSchema.index(
+  { transactionType: 1, referenceType: 1, referenceId: 1 },
+  {
+    name: "walletTransaction_referralReward_match_unique",
+    unique: true,
+    partialFilterExpression: {
+      transactionType: "REFERRAL_REWARD",
+      referenceType: "REFERRAL_REWARD",
       status: "SUCCESS",
     },
   }

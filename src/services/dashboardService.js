@@ -1,6 +1,7 @@
 const User = require("../models/User");
 const Game = require("../models/Game");
 const GameMatch = require("../models/GameMatch");
+const PlatformCommission = require("../models/PlatformCommission");
 const WalletTransaction = require("../models/WalletTransaction");
 const SupportTicket = require("../models/SupportTicket");
 const { TRANSACTION_TYPE } = require("../constants/transactionTypes");
@@ -31,7 +32,8 @@ async function getSummary(query = {}) {
     pendingWithdrawals,
     openSupportTickets,
     financialTotals,
-    platformEarnings,
+    platformCommissionTotals,
+    legacyPlatformFeeTotals,
   ] = await Promise.all([
     User.countDocuments({}),
     User.countDocuments({ active: true }),
@@ -68,10 +70,26 @@ async function getSummary(query = {}) {
         },
       },
     ]),
+    PlatformCommission.aggregate([
+      {
+        $match: {
+          accountingStatus: "RECORDED",
+          ...(dateRange ? { createdAt: dateRange } : {}),
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          amount: { $sum: "$commissionAmount" },
+          count: { $sum: 1 },
+        },
+      },
+    ]),
     GameMatch.aggregate([
       {
         $match: {
           status: MATCH_STATUS.SETTLED,
+          $or: [{ platformCommissionId: null }, { platformCommissionId: { $exists: false } }],
           ...(dateRange ? { settledAt: dateRange } : {}),
         },
       },
@@ -79,6 +97,7 @@ async function getSummary(query = {}) {
         $group: {
           _id: null,
           amount: { $sum: "$platformFee" },
+          count: { $sum: 1 },
         },
       },
     ]),
@@ -100,7 +119,13 @@ async function getSummary(query = {}) {
     openSupportTickets,
     totalDeposits: totalsByType.get(TRANSACTION_TYPE.ADD_MONEY) || 0,
     totalWithdrawals: totalsByType.get(TRANSACTION_TYPE.WITHDRAW) || 0,
-    platformEarnings: platformEarnings[0]?.amount || 0,
+    platformCommissionTotal: platformCommissionTotals[0]?.amount || 0,
+    platformCommissionCount: platformCommissionTotals[0]?.count || 0,
+    legacyPlatformFeeTotal: legacyPlatformFeeTotals[0]?.amount || 0,
+    legacySettledMatchCount: legacyPlatformFeeTotals[0]?.count || 0,
+    // Deprecated compatibility alias. New consumers should use the explicit
+    // platformCommissionTotal field; it never includes legacy platform fees.
+    platformEarnings: platformCommissionTotals[0]?.amount || 0,
   };
 }
 

@@ -13,6 +13,7 @@ describe("WalletTransaction settlement index semantics", () => {
     );
 
     const gameWin = findIndex("walletTransaction_gameWin_matchSettlement_unique");
+    const referralReward = findIndex("walletTransaction_referralReward_match_unique");
     const withdrawRefund = findIndex(
       "walletTransaction_withdrawRefund_withdrawal_unique"
     );
@@ -28,6 +29,7 @@ describe("WalletTransaction settlement index semantics", () => {
     );
 
     assert.ok(gameWin);
+    assert.ok(referralReward);
     assert.ok(withdrawRefund);
     assert.ok(matchRefund);
     assert.deepEqual(gameWin[0], {
@@ -43,6 +45,10 @@ describe("WalletTransaction settlement index semantics", () => {
     assert.equal(
       gameWin[1].partialFilterExpression.transactionType,
       "GAME_WIN"
+    );
+    assert.equal(
+      referralReward[1].partialFilterExpression.transactionType,
+      "REFERRAL_REWARD"
     );
     assert.equal(
       withdrawRefund[1].partialFilterExpression.transactionType,

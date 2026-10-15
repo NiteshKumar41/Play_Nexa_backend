@@ -2,10 +2,12 @@ function getAllowedOrigins() {
   const configuredOrigin = process.env.CLIENT_URL || process.env.FRONTEND_URL;
   const origins = new Set(configuredOrigin ? [configuredOrigin] : []);
 
-  // if (process.env.NODE_ENV !== "production") {
-  //   origins.add("http://localhost:3000");
-  //   origins.add("http://localhost:5173");
-  // }
+  if (process.env.NODE_ENV !== "production") {
+    origins.add("http://localhost:3000");
+    origins.add("http://localhost:5173");
+    origins.add("http://127.0.0.1:3000");
+    origins.add("http://127.0.0.1:5173");
+  }
 
   return origins;
 }

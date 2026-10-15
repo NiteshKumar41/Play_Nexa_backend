@@ -1,4 +1,5 @@
 const { roundMoney, addMoney, subtractMoney } = require("../utils/money");
+const { calculateCommission } = require("./commissionService");
 
 function calculateMatchFinancials(player1Amount, player2Amount) {
   const normalizedPlayer1Amount = roundMoney(player1Amount);
@@ -12,15 +13,32 @@ function calculateMatchFinancials(player1Amount, player2Amount) {
     normalizedPlayer1Amount,
     normalizedPlayer2Amount
   );
-  const feePercentage = normalizedPlayer1Amount < 100 ? 20 : 3;
-  const platformFee = roundMoney((totalPool * feePercentage) / 100);
+  const commission = calculateCommission({
+    entryAmount: normalizedPlayer1Amount,
+    grossWinningAmount: totalPool,
+  });
+  const feePercentage = commission.commissionRate;
+  const platformFee = commission.commissionAmount;
   const winnerAmount = subtractMoney(totalPool, platformFee);
 
   if (platformFee < 0 || winnerAmount < 0) {
     throw new RangeError("Match financial values cannot be negative");
   }
 
-  return { totalPool, feePercentage, platformFee, winnerAmount };
+  return {
+    totalPool,
+    feePercentage,
+    commissionRate: commission.commissionRate,
+    platformFee,
+    platformCommission: commission.commissionAmount,
+    grossWinningAmount: totalPool,
+    estimatedWinnerPayout: winnerAmount,
+    // Legacy calculation aliases are retained for callers that use this
+    // helper before settlement. SettlementService is authoritative for the
+    // final winnerNetPayout.
+    winnerAmount,
+    winnerNetPayout: winnerAmount,
+  };
 }
 
 module.exports = { calculateMatchFinancials };

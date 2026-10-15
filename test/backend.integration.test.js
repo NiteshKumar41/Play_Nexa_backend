@@ -41,6 +41,7 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
   const User = require("../src/models/User");
   const Wallet = require("../src/models/Wallet");
   const WalletTransaction = require("../src/models/WalletTransaction");
+  const PlatformCommission = require("../src/models/PlatformCommission");
   const PaymentEvent = require("../src/models/PaymentEvent");
   const Game = require("../src/models/Game");
   const GameMatch = require("../src/models/GameMatch");
@@ -326,10 +327,35 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
       });
       assert.equal(created.response.status, 201);
       assert.ok(created.data.data.token);
+      assert.match(created.data.data.user.referralCode, /^[A-Z0-9]{10}$/);
       assert.equal(
         (await Wallet.findOne({ userId: created.data.data.user.id })).balance,
         0
       );
+
+      const referredSignup = await api("/api/v1/auth/signup", {
+        method: "POST",
+        body: {
+          fullName: "Referred Signup",
+          phone: "9000000715",
+          password: "123456",
+          referralCode: created.data.data.user.referralCode,
+        },
+      });
+      assert.equal(referredSignup.response.status, 201);
+      const referredUser = await User.findById(referredSignup.data.data.user.id).lean();
+      assert.equal(referredUser.referredBy.toString(), created.data.data.user.id);
+
+      const invalidReferral = await api("/api/v1/auth/signup", {
+        method: "POST",
+        body: {
+          fullName: "Invalid Referral",
+          phone: "9000000716",
+          password: "123456",
+          referralCode: "NOT-A-CODE",
+        },
+      });
+      assert.equal(invalidReferral.response.status, 400);
 
       const duplicate = await api("/api/v1/auth/signup", {
         method: "POST",
@@ -1298,7 +1324,7 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
       ]);
       assert.equal(settleResults.filter(result => result.response.status === 200).length, 1);
       assert.equal(settleResults.filter(result => result.response.status === 409).length, 1);
-      assert.equal((await Wallet.findById(winnerWallet._id)).balance, beforePayout + 80);
+      assert.equal((await Wallet.findById(winnerWallet._id)).balance, beforePayout + 97);
       assert.equal(
         await WalletTransaction.countDocuments({
           transactionType: "GAME_WIN",
@@ -1310,15 +1336,26 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
       );
       const settled = await GameMatch.findById(matchId).lean();
       assert.equal(settled.status, "SETTLED");
-      assert.equal(settled.platformFee, 20);
-      assert.equal(settled.winnerAmount, 80);
+      assert.equal(settled.grossWinningAmount, 100);
+      assert.equal(settled.commissionRate, 3);
+      assert.equal(settled.platformCommission, 3);
+      assert.equal(settled.platformFee, 3);
+      assert.equal(settled.referralReward, 0);
+      assert.equal(settled.winnerNetPayout, 97);
+      assert.equal(settled.winnerAmount, 97);
       assert.equal(settled.settlementWalletTransactionIds.length, 1);
+      assert.equal(
+        await PlatformCommission.countDocuments({ matchId }),
+        1
+      );
       const dashboardSummary = await api(
         "/api/v1/admin/dashboard/summary",
         { token: tokens[3] }
       );
       assert.equal(dashboardSummary.response.status, 200);
-      assert.equal(dashboardSummary.data.data.platformEarnings, 20);
+      assert.equal(dashboardSummary.data.data.platformCommissionTotal, 3);
+      assert.equal(dashboardSummary.data.data.platformCommissionCount, 1);
+      assert.equal(dashboardSummary.data.data.legacyPlatformFeeTotal, 0);
 
       const refundMatch = await createMatch(0);
       const refundMatchId = refundMatch.data.data.match.id;
@@ -1380,6 +1417,177 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
         409
       );
       assert.equal((await GameMatch.findById(refundMatchId)).status, "CANCELLED");
+    });
+
+    it("credits the stored referrer once and keeps winner settlement atomic", async () => {
+      const referrerSignup = await api("/api/v1/auth/signup", {
+        method: "POST",
+        body: {
+          fullName: "Commission Referrer",
+          phone: "9000000720",
+          password: "123456",
+        },
+      });
+      assert.equal(referrerSignup.response.status, 201);
+      const referredWinnerSignup = await api("/api/v1/auth/signup", {
+        method: "POST",
+        body: {
+          fullName: "Referred Winner",
+          phone: "9000000721",
+          password: "123456",
+          referralCode: referrerSignup.data.data.user.referralCode,
+        },
+      });
+      assert.equal(referredWinnerSignup.response.status, 201);
+
+      const winnerId = referredWinnerSignup.data.data.user.id;
+      const referrerId = referrerSignup.data.data.user.id;
+      const winnerToken = referredWinnerSignup.data.data.token;
+      await Wallet.updateOne({ userId: winnerId }, { $set: { balance: 1000 } });
+      await Wallet.updateOne({ userId: referrerId }, { $set: { balance: 1000 } });
+      await Wallet.updateOne({ userId: players[2]._id }, { $set: { balance: 1000 } });
+
+      const created = await api("/api/v1/matches", {
+        token: winnerToken,
+        method: "POST",
+        body: {
+          gameId: game._id.toString(),
+          entryFee: 100,
+          clientRequestId: "referral-settlement-match",
+        },
+      });
+      assert.equal(created.response.status, 201);
+      const matchId = created.data.data.match.id;
+      const joined = await joinMatch(2, matchId);
+      assert.equal(joined.response.status, 200);
+      assert.equal(joined.data.data.match.winnerNetPayout, 0);
+      assert.equal(joined.data.data.match.estimatedWinnerPayout, 190);
+
+      const claim = await api(`/api/v1/matches/${matchId}/result`, {
+        token: winnerToken,
+        method: "POST",
+        form: makeForm({ winnerClaim: "true" }, "screenshot"),
+      });
+      assert.equal(claim.response.status, 200);
+      const claimed = await GameMatch.findById(matchId).lean();
+      uploadedFiles.result.push(
+        new URL(claimed.p1Screenshot, "http://local").pathname.split("/").at(-1)
+      );
+
+      const winnerWallet = await Wallet.findOne({ userId: winnerId });
+      const referrerWallet = await Wallet.findOne({ userId: referrerId });
+      const winnerBefore = (await Wallet.findById(winnerWallet._id)).balance;
+      const referrerBefore = (await Wallet.findById(referrerWallet._id)).balance;
+      const settleRequests = await Promise.all([
+        api(`/api/v1/admin/matches/${matchId}/settle`, {
+          token: tokens[3],
+          method: "POST",
+          body: { action: "DECLARE_WINNER", winnerUserId: winnerId },
+        }),
+        api(`/api/v1/admin/matches/${matchId}/settle`, {
+          token: tokens[3],
+          method: "POST",
+          body: { action: "DECLARE_WINNER", winnerUserId: winnerId },
+        }),
+      ]);
+      assert.equal(settleRequests.filter(result => result.response.status === 200).length, 1);
+      assert.equal(settleRequests.filter(result => result.response.status === 409).length, 1);
+      assert.equal((await Wallet.findById(winnerWallet._id)).balance, winnerBefore + 186);
+      assert.equal((await Wallet.findById(referrerWallet._id)).balance, referrerBefore + 4);
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          transactionType: "REFERRAL_REWARD",
+          referenceType: "REFERRAL_REWARD",
+          referenceId: matchId,
+          status: "SUCCESS",
+        }),
+        1
+      );
+      const settled = await GameMatch.findById(matchId).lean();
+      assert.equal(settled.grossWinningAmount, 200);
+      assert.equal(settled.commissionRate, 5);
+      assert.equal(settled.platformCommission, 10);
+      assert.equal(settled.referralReward, 4);
+      assert.equal(settled.winnerNetPayout, 186);
+      assert.equal(settled.settlementWalletTransactionIds.length, 2);
+      assert.equal(await PlatformCommission.countDocuments({ matchId }), 1);
+
+      const winnerTransaction = await WalletTransaction.findOne({
+        transactionType: "GAME_WIN",
+        referenceType: "MATCH_SETTLEMENT",
+        referenceId: matchId,
+        status: "SUCCESS",
+      }).lean();
+      const referralTransaction = await WalletTransaction.findOne({
+        transactionType: "REFERRAL_REWARD",
+        referenceType: "REFERRAL_REWARD",
+        referenceId: matchId,
+        status: "SUCCESS",
+      }).lean();
+      assert.equal(winnerTransaction.balanceBefore, winnerBefore);
+      assert.equal(winnerTransaction.balanceAfter, winnerBefore + 186);
+      assert.equal(referralTransaction.balanceBefore, referrerBefore);
+      assert.equal(referralTransaction.balanceAfter, referrerBefore + 4);
+
+      const failedMatchResponse = await api("/api/v1/matches", {
+        token: winnerToken,
+        method: "POST",
+        body: {
+          gameId: game._id.toString(),
+          entryFee: 100,
+          clientRequestId: "referral-settlement-rollback-match",
+        },
+      });
+      assert.equal(failedMatchResponse.response.status, 201);
+      const failedMatchId = failedMatchResponse.data.data.match.id;
+      assert.equal((await joinMatch(2, failedMatchId)).response.status, 200);
+      const failedClaim = await api(`/api/v1/matches/${failedMatchId}/result`, {
+        token: winnerToken,
+        method: "POST",
+        form: makeForm({ winnerClaim: "true" }, "screenshot"),
+      });
+      assert.equal(failedClaim.response.status, 200);
+      const failedClaimMatch = await GameMatch.findById(failedMatchId).lean();
+      uploadedFiles.result.push(
+        new URL(failedClaimMatch.p1Screenshot, "http://local").pathname.split("/").at(-1)
+      );
+      const winnerBeforeFailedSettlement = (await Wallet.findById(winnerWallet._id)).balance;
+      await Wallet.deleteOne({ _id: referrerWallet._id });
+      const failedSettlement = await api(`/api/v1/admin/matches/${failedMatchId}/settle`, {
+        token: tokens[3],
+        method: "POST",
+        body: { action: "DECLARE_WINNER", winnerUserId: winnerId },
+      });
+      assert.equal(failedSettlement.response.status, 404);
+      assert.equal((await Wallet.findById(winnerWallet._id)).balance, winnerBeforeFailedSettlement);
+      assert.equal((await GameMatch.findById(failedMatchId)).status, "COMPLETED");
+      assert.equal(await PlatformCommission.countDocuments({ matchId: failedMatchId }), 0);
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          transactionType: "GAME_WIN",
+          referenceType: "MATCH_SETTLEMENT",
+          referenceId: failedMatchId,
+          status: "SUCCESS",
+        }),
+        0
+      );
+      const refundedFailedSettlement = await api(`/api/v1/admin/matches/${failedMatchId}/settle`, {
+        token: tokens[3],
+        method: "POST",
+        body: { action: "REFUND_BOTH" },
+      });
+      assert.equal(refundedFailedSettlement.response.status, 200);
+      assert.equal((await GameMatch.findById(failedMatchId)).status, "CANCELLED");
+      assert.equal(
+        await WalletTransaction.countDocuments({
+          transactionType: "REFERRAL_REWARD",
+          referenceType: "REFERRAL_REWARD",
+          referenceId: failedMatchId,
+          status: "SUCCESS",
+        }),
+        0
+      );
+      assert.equal(await PlatformCommission.countDocuments({ matchId: failedMatchId }), 0);
     });
 
     it("blocks GAME_WIN after a player refund and preserves settlement duplicate guards", async () => {
@@ -2033,15 +2241,25 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
     it("filters financial totals by IST calendar dates and validates financial tiers", async () => {
       assert.deepEqual(calculateMatchFinancials(50, 50), {
         totalPool: 100,
-        feePercentage: 20,
-        platformFee: 20,
-        winnerAmount: 80,
+        feePercentage: 3,
+        commissionRate: 3,
+        platformFee: 3,
+        platformCommission: 3,
+        grossWinningAmount: 100,
+        estimatedWinnerPayout: 97,
+        winnerAmount: 97,
+        winnerNetPayout: 97,
       });
       assert.deepEqual(calculateMatchFinancials(100, 100), {
         totalPool: 200,
-        feePercentage: 3,
-        platformFee: 6,
-        winnerAmount: 194,
+        feePercentage: 5,
+        commissionRate: 5,
+        platformFee: 10,
+        platformCommission: 10,
+        grossWinningAmount: 200,
+        estimatedWinnerPayout: 190,
+        winnerAmount: 190,
+        winnerNetPayout: 190,
       });
 
       const wallet = await Wallet.findOne({ userId: players[0]._id });
@@ -2071,7 +2289,8 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
       );
       assert.equal(dashboard.response.status, 200);
       assert.equal(dashboard.data.data.totalDeposits, 5);
-      assert.equal(typeof dashboard.data.data.platformEarnings, "number");
+      assert.equal(typeof dashboard.data.data.platformCommissionTotal, "number");
+      assert.equal(typeof dashboard.data.data.platformCommissionCount, "number");
       const invalidDate = await api(
         "/api/v1/admin/dashboard/summary?from=2026-02-30",
         { token: tokens[3] }

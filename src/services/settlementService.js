@@ -2,13 +2,17 @@ const mongoose = require("mongoose");
 const GameMatch = require("../models/GameMatch");
 const User = require("../models/User");
 const WalletTransaction = require("../models/WalletTransaction");
+const PlatformCommission = require("../models/PlatformCommission");
 const { MATCH_STATUS } = require("../constants/matchStatus");
 const { WINNER_CLAIM_STATUS } = require("../constants/winnerClaimStatus");
 const { TRANSACTION_TYPE } = require("../constants/transactionTypes");
 const { TRANSACTION_STATUS } = require("../constants/transactionStatus");
 const walletService = require("./walletService");
-const { calculateMatchFinancials } = require("./matchFinancialService");
-const { roundMoney } = require("../utils/money");
+const {
+  calculateSettlementFinancials,
+  recordPlatformCommission,
+} = require("./commissionService");
+const { addMoney, roundMoney } = require("../utils/money");
 
 const SETTLEMENT_ACTIONS = new Set([
   "DECLARE_WINNER",
@@ -86,12 +90,9 @@ function validateMatchAmounts(match) {
     );
   }
 
-  let financials;
+  let totalPool;
   try {
-    financials = calculateMatchFinancials(
-      normalizedPlayer1Amount,
-      normalizedPlayer2Amount
-    );
+    totalPool = addMoney(normalizedPlayer1Amount, normalizedPlayer2Amount);
   } catch (error) {
     throw createSettlementError("Match financial calculation is invalid", 400);
   }
@@ -104,7 +105,7 @@ function validateMatchAmounts(match) {
   if (
     typeof prizePool !== "number" ||
     !Number.isFinite(prizePool) ||
-    normalizedPrizePool !== financials.totalPool
+    normalizedPrizePool !== totalPool
   ) {
     console.error(`Match financial data is inconsistent: ${match._id}`);
     throw createSettlementError(
@@ -113,16 +114,11 @@ function validateMatchAmounts(match) {
     );
   }
 
-  if (
-    !Number.isFinite(financials.platformFee) ||
-    !Number.isFinite(financials.winnerAmount) ||
-    financials.platformFee < 0 ||
-    financials.winnerAmount < 0
-  ) {
-    throw createSettlementError("Match financial calculation is invalid", 400);
-  }
-
-  return financials;
+  return {
+    entryAmount: normalizedPlayer1Amount,
+    totalPool,
+    grossWinningAmount: normalizedPrizePool,
+  };
 }
 
 function validateSettleableMatch(match) {
@@ -233,16 +229,82 @@ async function declareWinner(matchId, adminId, winnerUserId, reason) {
         throw createSettlementError("Match has already been settled", 409);
       }
 
+      const priorReferralReward = await WalletTransaction.findOne({
+        transactionType: TRANSACTION_TYPE.REFERRAL_REWARD,
+        referenceType: "REFERRAL_REWARD",
+        referenceId: matchReferenceId,
+        status: TRANSACTION_STATUS.SUCCESS,
+      })
+        .select("_id")
+        .session(session);
+      if (priorReferralReward) {
+        throw createSettlementError("Match referral reward already exists", 409);
+      }
+
+      const winnerUser = await User.findById(winnerId)
+        .select("_id phone referredBy")
+        .session(session);
+      if (!winnerUser) {
+        throw createSettlementError("Winner account not found", 404);
+      }
+
+      const referrer = winnerUser.referredBy
+        ? await User.findById(winnerUser.referredBy)
+            .select("_id phone")
+            .session(session)
+        : null;
+      const hasEligibleReferrer = Boolean(
+        referrer && referrer._id.toString() !== winnerId
+      );
+      const settlementFinancials = calculateSettlementFinancials({
+        entryAmount: financials.entryAmount,
+        grossWinningAmount: financials.grossWinningAmount,
+        hasEligibleReferrer,
+      });
+
+      const priorCommission = await PlatformCommission.findOne({
+        matchId: match._id,
+      })
+        .select("_id")
+        .session(session);
+      if (priorCommission) {
+        throw createSettlementError("Match commission has already been recorded", 409);
+      }
+
       const winnerPhone =
         winnerId === player1Id ? match.player1Phone : match.player2Phone;
       const walletChange = await walletService.creditWallet({
         userId: winnerId,
         phone: winnerPhone,
-        amount: financials.winnerAmount,
+        amount: settlementFinancials.winnerNetPayout,
         transactionType: TRANSACTION_TYPE.GAME_WIN,
         remarks: "Match winner payout",
         referenceId: matchReferenceId,
         referenceType: "MATCH_SETTLEMENT",
+        session,
+      });
+
+      let referralWalletChange = null;
+      if (settlementFinancials.referralReward > 0 && referrer) {
+        referralWalletChange = await walletService.creditWallet({
+          userId: referrer._id,
+          phone: referrer.phone,
+          amount: settlementFinancials.referralReward,
+          transactionType: TRANSACTION_TYPE.REFERRAL_REWARD,
+          remarks: "Referral reward for match winner",
+          referenceId: matchReferenceId,
+          referenceType: "REFERRAL_REWARD",
+          session,
+        });
+      }
+
+      const platformCommission = await recordPlatformCommission({
+        matchId: match._id,
+        entryAmount: settlementFinancials.entryAmount,
+        grossWinningAmount: settlementFinancials.grossWinningAmount,
+        commissionRate: settlementFinancials.commissionRate,
+        commissionAmount: settlementFinancials.commissionAmount,
+        settlementReference: `MATCH_SETTLEMENT:${matchReferenceId}`,
         session,
       });
 
@@ -259,16 +321,28 @@ async function declareWinner(matchId, adminId, winnerUserId, reason) {
             winnerPlayer: winnerId,
             winnerClaimStatus: WINNER_CLAIM_STATUS.APPROVED,
             prizePool: financials.totalPool,
-            platformFee: financials.platformFee,
-            winnerAmount: financials.winnerAmount,
+            grossWinningAmount: settlementFinancials.grossWinningAmount,
+            commissionRate: settlementFinancials.commissionRate,
+            platformCommission: settlementFinancials.commissionAmount,
+            referralReward: settlementFinancials.referralReward,
+            winnerNetPayout: settlementFinancials.winnerNetPayout,
+            estimatedWinnerPayout: null,
+            // Compatibility aliases retained for existing API consumers.
+            platformFee: settlementFinancials.commissionAmount,
+            winnerAmount: settlementFinancials.winnerNetPayout,
             winnerTransactionId: walletChange.transactionId,
+            referralRewardTransactionId: referralWalletChange?.transactionId || null,
+            platformCommissionId: platformCommission._id,
             settledAt,
             settledBy: adminId,
             settlementAction: "DECLARE_WINNER",
             settlementReason,
             rejectionReason: null,
             refundAmountPerPlayer: null,
-            settlementWalletTransactionIds: [walletChange.transactionId],
+            settlementWalletTransactionIds: [
+              walletChange.transactionId,
+              referralWalletChange?.transactionId,
+            ].filter(Boolean),
           },
         },
         { new: true, runValidators: true, session }
@@ -282,8 +356,16 @@ async function declareWinner(matchId, adminId, winnerUserId, reason) {
         matchId: settledMatch._id.toString(),
         status: settledMatch.status,
         winnerUserId: winnerId,
-        winnerAmount: financials.winnerAmount,
-        platformFee: financials.platformFee,
+        grossWinningAmount: settlementFinancials.grossWinningAmount,
+        commissionRate: settlementFinancials.commissionRate,
+        platformCommission: settlementFinancials.commissionAmount,
+        referralReward: settlementFinancials.referralReward,
+        winnerNetPayout: settlementFinancials.winnerNetPayout,
+        // Compatibility aliases retained for existing API consumers.
+        winnerAmount: settlementFinancials.winnerNetPayout,
+        platformFee: settlementFinancials.commissionAmount,
+        referralRewardTransactionId: referralWalletChange?.transactionId || null,
+        platformCommissionId: platformCommission._id.toString(),
         settlementAction: "DECLARE_WINNER",
         newlyFinalized: true,
       };
@@ -333,6 +415,26 @@ async function refundBothPlayers(
       if (successfulGameWin) {
         throw createSettlementError(
           "A successful game settlement already exists for a match player",
+          409
+        );
+      }
+
+      const [successfulReferralReward, existingCommission] = await Promise.all([
+        WalletTransaction.findOne({
+          transactionType: TRANSACTION_TYPE.REFERRAL_REWARD,
+          referenceType: "REFERRAL_REWARD",
+          referenceId: matchReferenceId,
+          status: TRANSACTION_STATUS.SUCCESS,
+        })
+          .select("_id")
+          .session(session),
+        PlatformCommission.findOne({ matchId: match._id })
+          .select("_id")
+          .session(session),
+      ]);
+      if (successfulReferralReward || existingCommission) {
+        throw createSettlementError(
+          "A successful game settlement already exists for this match",
           409
         );
       }
@@ -402,8 +504,15 @@ async function refundBothPlayers(
             status: MATCH_STATUS.CANCELLED,
             winnerPlayer: null,
             winnerClaimStatus: WINNER_CLAIM_STATUS.REJECTED,
+            grossWinningAmount: 0,
+            commissionRate: 0,
+            platformCommission: 0,
+            referralReward: 0,
+            winnerNetPayout: 0,
             winnerAmount: 0,
             winnerTransactionId: null,
+            referralRewardTransactionId: null,
+            platformCommissionId: null,
             platformFee: 0,
             cancelledAt: now,
             settledAt: now,
@@ -542,6 +651,14 @@ function formatQueueMatch(match) {
         }
       : null,
     prizePool: match.prizePool,
+    grossWinningAmount: match.grossWinningAmount,
+    commissionRate: match.commissionRate,
+    platformCommission: match.platformCommission,
+    referralReward: match.referralReward,
+    winnerNetPayout: match.winnerNetPayout,
+    estimatedWinnerPayout: match.estimatedWinnerPayout,
+    platformFee: match.platformFee,
+    winnerAmount: match.winnerAmount,
     winnerPlayer: match.winnerPlayer?.toString() || null,
     winnerClaimedBy: match.winnerClaimedBy?.toString() || null,
     winnerClaimStatus: match.winnerClaimStatus,
@@ -650,6 +767,14 @@ async function getSettlementHistory(query = {}) {
     winnerPlayer: match.winnerPlayer?.toString() || null,
     winnerAmount: match.winnerAmount,
     platformFee: match.platformFee,
+    grossWinningAmount: match.grossWinningAmount,
+    commissionRate: match.commissionRate,
+    platformCommission: match.platformCommission,
+    referralReward: match.referralReward,
+    winnerNetPayout: match.winnerNetPayout,
+    platformCommissionId: match.platformCommissionId?.toString() || null,
+    referralRewardTransactionId:
+      match.referralRewardTransactionId?.toString() || null,
     refundAmountPerPlayer: match.refundAmountPerPlayer,
     settledAt: match.settledAt,
     createdAt: match.createdAt,
@@ -675,16 +800,21 @@ async function getSettlementDetail(matchId) {
   if (!match) throw createSettlementError("Match not found", 404);
 
   const transactionIds = match.settlementWalletTransactionIds || [];
-  const transactions = transactionIds.length
-    ? await WalletTransaction.find({ _id: { $in: transactionIds } })
-        .select("_id walletId userId phone transactionType amount balanceBefore balanceAfter status remarks referenceType referenceId createdAt")
-        .lean()
-    : await WalletTransaction.find({
-        referenceId: match._id.toString(),
-        referenceType: { $in: ["MATCH_SETTLEMENT", "MATCH_REFUND"] },
-      })
-        .select("_id walletId userId phone transactionType amount balanceBefore balanceAfter status remarks referenceType referenceId createdAt")
-        .lean();
+  const [transactions, platformCommission] = await Promise.all([
+    transactionIds.length
+      ? WalletTransaction.find({ _id: { $in: transactionIds } })
+          .select("_id walletId userId phone transactionType amount balanceBefore balanceAfter status remarks referenceType referenceId createdAt")
+          .lean()
+      : WalletTransaction.find({
+          referenceId: match._id.toString(),
+          referenceType: {
+            $in: ["MATCH_SETTLEMENT", "MATCH_REFUND", "REFERRAL_REWARD"],
+          },
+        })
+          .select("_id walletId userId phone transactionType amount balanceBefore balanceAfter status remarks referenceType referenceId createdAt")
+          .lean(),
+    PlatformCommission.findOne({ matchId: match._id }).lean(),
+  ]);
 
   return {
     match: {
@@ -713,10 +843,29 @@ async function getSettlementDetail(matchId) {
         player1Amount: match.player1Amount,
         player2Amount: match.player2Amount,
         prizePool: match.prizePool,
+        grossWinningAmount: match.grossWinningAmount,
+        commissionRate: match.commissionRate,
+        platformCommission: match.platformCommission,
+        referralReward: match.referralReward,
+        winnerNetPayout: match.winnerNetPayout,
+        estimatedWinnerPayout: match.estimatedWinnerPayout,
         platformFee: match.platformFee,
         winnerAmount: match.winnerAmount,
         refundAmountPerPlayer: match.refundAmountPerPlayer,
       },
+      platformCommission: platformCommission
+        ? {
+            id: platformCommission._id.toString(),
+            matchId: platformCommission.matchId.toString(),
+            entryAmount: platformCommission.entryAmount,
+            grossWinningAmount: platformCommission.grossWinningAmount,
+            commissionRate: platformCommission.commissionRate,
+            commissionAmount: platformCommission.commissionAmount,
+            settlementReference: platformCommission.settlementReference,
+            accountingStatus: platformCommission.accountingStatus,
+            createdAt: platformCommission.createdAt,
+          }
+        : null,
       settlement: {
         settledBy: match.settledBy
           ? { id: match.settledBy._id.toString(), name: match.settledBy.fullName, phone: match.settledBy.phone }

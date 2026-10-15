@@ -59,6 +59,8 @@ app.get("/health", sendHealthResponse);
 app.get("/api/health", sendHealthResponse);
 
 app.use("/api/v1/auth", require("./routes/authRoutes"));
+app.use("/api/v1/profile", require("./routes/profileRoutes"));
+app.use("/api/v1/dashboard", require("./routes/dashboardRoutes"));
 app.use("/api/v1/wallet", require("./routes/walletRoutes"));
 app.use("/api/v1/payments/razorpay", require("./routes/paymentRoutes"));
 app.use("/api/v1/webhooks", require("./routes/webhookRoutes"));

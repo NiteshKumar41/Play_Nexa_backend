@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const User = require("../models/User");
 const Wallet = require("../models/Wallet");
+const { ensureReferralCode } = require("./referralService");
 
 function createUserError(message, statusCode) {
   const error = new Error(message);
@@ -54,6 +55,151 @@ function formatUser(user) {
     isBlocked: user.isBlocked,
     createdAt: user.createdAt,
   };
+}
+
+function formatOwnProfile(user) {
+  return {
+    id: user._id.toString(),
+    fullName: user.fullName,
+    phone: user.phone,
+    email: user.email || null,
+    dob: user.dob || null,
+    gender: user.gender || null,
+    upiId: user.upiId || null,
+    referralCode: user.referralCode || null,
+    hasReferrer: Boolean(user.referredBy),
+    role: user.role,
+    active: user.active,
+    isBlocked: user.isBlocked,
+    createdAt: user.createdAt,
+  };
+}
+
+function validateProfileDateOfBirth(dob) {
+  if (dob === undefined || dob === null || dob === "") return;
+  if (typeof dob !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dob)) {
+    throw createUserError("Date of birth must use YYYY-MM-DD format", 400);
+  }
+
+  const [year, month, day] = dob.split("-").map(Number);
+  const parsedDate = new Date(Date.UTC(year, month - 1, day));
+  if (
+    parsedDate.getUTCFullYear() !== year ||
+    parsedDate.getUTCMonth() !== month - 1 ||
+    parsedDate.getUTCDate() !== day ||
+    parsedDate.getTime() > Date.now()
+  ) {
+    throw createUserError("Date of birth is invalid", 400);
+  }
+}
+
+function normalizeProfileUpdate(profileData) {
+  if (
+    !profileData ||
+    typeof profileData !== "object" ||
+    Array.isArray(profileData)
+  ) {
+    throw createUserError("Invalid profile details", 400);
+  }
+
+  const allowedFields = ["fullName", "email", "dob", "gender", "upiId"];
+  const unsupportedFields = Object.keys(profileData).filter(
+    field => !allowedFields.includes(field)
+  );
+  if (unsupportedFields.length > 0) {
+    throw createUserError(
+      `These fields cannot be changed: ${unsupportedFields.join(", ")}`,
+      400
+    );
+  }
+
+  const update = { $set: {}, $unset: {} };
+
+  if (Object.hasOwn(profileData, "fullName")) {
+    if (
+      typeof profileData.fullName !== "string" ||
+      !profileData.fullName.trim() ||
+      profileData.fullName.trim().length > 120
+    ) {
+      throw createUserError("Full name must be 1-120 characters", 400);
+    }
+    update.$set.fullName = profileData.fullName.trim();
+  }
+
+  if (Object.hasOwn(profileData, "email")) {
+    if (profileData.email === null || profileData.email === "") {
+      update.$unset.email = 1;
+    } else if (
+      typeof profileData.email !== "string" ||
+      profileData.email.trim().length > 254 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(profileData.email.trim())
+    ) {
+      throw createUserError("Email must be a valid email address", 400);
+    } else {
+      update.$set.email = profileData.email.trim().toLowerCase();
+    }
+  }
+
+  if (Object.hasOwn(profileData, "dob")) {
+    validateProfileDateOfBirth(profileData.dob);
+    if (profileData.dob === null || profileData.dob === "") {
+      update.$unset.dob = 1;
+    } else {
+      update.$set.dob = profileData.dob;
+    }
+  }
+
+  for (const field of ["gender", "upiId"]) {
+    if (!Object.hasOwn(profileData, field)) continue;
+    const value = profileData[field];
+    if (value === null || value === "") {
+      update.$unset[field] = 1;
+      continue;
+    }
+    if (typeof value !== "string" || value.trim().length > (field === "upiId" ? 200 : 50)) {
+      throw createUserError(
+        `${field === "upiId" ? "UPI ID" : "Gender"} is invalid`,
+        400
+      );
+    }
+    if (field === "upiId" && (!/^\S+@\S+$/.test(value.trim()) || /\s/.test(value.trim()))) {
+      throw createUserError("UPI ID must be valid", 400);
+    }
+    update.$set[field] = value.trim();
+  }
+
+  if (Object.keys(update.$set).length === 0) delete update.$set;
+  if (Object.keys(update.$unset).length === 0) delete update.$unset;
+  if (!update.$set && !update.$unset) {
+    throw createUserError("At least one profile field is required", 400);
+  }
+  return update;
+}
+
+async function getOwnProfile(userId) {
+  validateUserId(userId);
+  await ensureReferralCode(userId);
+  const user = await User.findById(userId)
+    .select("_id fullName phone email dob gender upiId referralCode referredBy role active isBlocked createdAt")
+    .lean();
+  if (!user) throw createUserError("User account not found", 404);
+  return formatOwnProfile(user);
+}
+
+async function updateOwnProfile(userId, profileData) {
+  validateUserId(userId);
+  const update = normalizeProfileUpdate(profileData);
+  const user = await User.findByIdAndUpdate(
+    userId,
+    update,
+    { new: true, runValidators: true }
+  )
+    .select("_id fullName phone email dob gender upiId referralCode referredBy role active isBlocked createdAt")
+    .lean();
+  if (!user) throw createUserError("User account not found", 404);
+
+  await ensureReferralCode(userId);
+  return getOwnProfile(userId);
 }
 
 async function lockAvailableAdminRoster(session) {
@@ -254,4 +400,7 @@ module.exports = {
   updateUserStatus,
   updateUserBlock,
   updateUserRole,
+  getOwnProfile,
+  updateOwnProfile,
+  normalizeProfileUpdate,
 };

@@ -376,6 +376,31 @@ if (!TEST_DATABASE_URI || !/test/i.test(testDatabaseName)) {
       for (const secretField of ["password", "passwordHash", "salt", "token"]) {
         assert.equal(Object.hasOwn(me.data.data.user, secretField), false);
       }
+      const profile = await api("/api/v1/profile/me", { token: tokens[0] });
+      assert.equal(profile.response.status, 200);
+      assert.equal(profile.data.data.profile.id, players[0]._id.toString());
+      assert.equal(profile.data.data.profile.phone, players[0].phone);
+      for (const protectedField of ["password", "referredBy", "adminSafetyVersion"]) {
+        assert.equal(Object.hasOwn(profile.data.data.profile, protectedField), false);
+      }
+      const updatedProfile = await api("/api/v1/profile/me", {
+        token: tokens[0],
+        method: "PATCH",
+        body: { fullName: "Updated Integration Player", email: "updated@example.test" },
+      });
+      assert.equal(updatedProfile.response.status, 200);
+      assert.equal(updatedProfile.data.data.profile.fullName, "Updated Integration Player");
+      const protectedUpdate = await api("/api/v1/profile/me", {
+        token: tokens[0],
+        method: "PATCH",
+        body: { role: "admin" },
+      });
+      assert.equal(protectedUpdate.response.status, 400);
+      const playerDashboard = await api("/api/v1/dashboard/summary", { token: tokens[0] });
+      assert.equal(playerDashboard.response.status, 200);
+      assert.equal(playerDashboard.data.data.profile.id, players[0]._id.toString());
+      assert.equal(playerDashboard.data.data.wallet.availableBalance, 0);
+      assert.deepEqual(playerDashboard.data.data.recentActivity, []);
       const wallet = await api("/api/v1/wallet", { token: tokens[0] });
       assert.equal(wallet.response.status, 200);
       assert.equal(wallet.data.data.balance, 0);

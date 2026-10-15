@@ -60,6 +60,16 @@ All authentication endpoints use `/api/v1/auth`:
 
 Signup requires `fullName`, a 10-digit Indian `phone`, and a six-digit numeric `password`. `email`, `dob`, `gender`, and `upiId` are optional. Passwords are hashed and never included in API responses.
 
+## Profile and player dashboard API
+
+Authenticated player routes use the verified JWT identity; no user ID is accepted from the client:
+
+- `GET /api/v1/profile/me` returns the safe profile, including the server-generated referral code and whether referral attribution exists.
+- `PATCH /api/v1/profile/me` updates only `fullName`, `email`, `dob`, `gender`, and `upiId`. Phone, role, account status, referral code, referral attribution, wallet data, and financial records are protected.
+- `GET /api/v1/dashboard/summary` returns the authenticated user's profile, wallet summary, ledger-backed wallet totals, settled match statistics, referral summary, and bounded recent wallet/match activity.
+
+Dashboard winnings and referral totals are read from successful wallet ledger records. Match gross winnings are read from settled matches, while net winnings are read from successful `GAME_WIN` transactions. Empty activity is returned as an empty list; a missing wallet is flagged as unavailable rather than treated as a failed request or silently presented as a usable balance.
+
 ## Wallet API
 
 Wallet routes require authentication. The backend identifies the wallet from the verified user in the JWT; clients cannot request another user's wallet.
@@ -124,7 +134,7 @@ walletService
 
 Joining follows the same route → controller → service → wallet service path. It debits Player 2, records the `GAME_JOIN` transaction, and conditionally updates the match to `JOINED` in one transaction. The conditional update on `status: ACTIVE` and an empty `player2` prevents competing join requests from both claiming the same match; a losing request rolls back its wallet debit and receives `409 Match is no longer available`.
 
-The platform fee is based on the individual entry amount, not the total pool: an entry below ₹100 incurs 20%, and an entry of ₹100 or more incurs 3%. Once both players have joined, the match records the total pool, platform fee, and winner amount for information. An administrator later settles the claim, credits the approved winner, or refunds both players.
+For new settlements, the individual entry amount selects the commission slab, while the commission is calculated on the full `prizePool` gross winning amount. The current rates are 0% below ₹10, 1.5% for ₹10–₹20, 2% for ₹21–₹40, 3% for ₹41–₹60, 4% for ₹61–₹80, 5% for ₹81–₹100, and 4% above ₹100. The final winner payout is `prizePool - platformCommission - referralReward`; a referral reward is 2% of the gross amount only when it is strictly greater than ₹100 and the winner has a stored referrer. New settlement accounting is stored in `PlatformCommission`; it is not a player wallet balance or withdrawable cash. Legacy settlement fields remain for historical compatibility and are not rewritten.
 
 React integration is intentionally deferred until after this backend checkpoint. When connected, the client should request data and submit actions through these REST endpoints; the server remains authoritative for wallet balances, entry fees, match state, and financial values.
 
@@ -224,12 +234,12 @@ The admin can declare only one of the match participants as winner. For an undis
 
 Financial values are recalculated from the stored player entry amounts. The entries must both be valid, equal, and consistent with the recorded prize pool:
 
-| Player entries | Pool | Fee rate | Platform fee | Winner payout |
+| Player entries | Pool | Commission rate | Commission | Winner payout without/with eligible referral |
 | --- | ---: | ---: | ---: | ---: |
-| ₹50 + ₹50 | ₹100 | 20% | ₹20 | ₹80 |
-| ₹100 + ₹100 | ₹200 | 3% | ₹6 | ₹194 |
+| ₹50 + ₹50 | ₹100 | 3% | ₹3 | ₹97 / ₹97 |
+| ₹100 + ₹100 | ₹200 | 5% | ₹10 | ₹190 / ₹186 |
 
-The platform fee is stored on the match as platform revenue; this implementation does not create or credit an admin/platform wallet. Settlement and refunds run through `walletService` in the same MongoDB transaction as their successful `GAME_WIN` or `GAME_REFUND` records and the final match update. Unique partial indexes on match transaction references prevent a second payout or duplicate per-player refund. A repeated refund request is rejected with `409`; the original per-player credits and ledger records are never repeated. An already settled winner payout is also rejected.
+The `PlatformCommission` record is an accounting record only; this implementation does not create or credit an admin/platform wallet. Settlement and refunds run through `walletService` in the same MongoDB transaction as their successful `GAME_WIN` or `GAME_REFUND` records and the final match update. Unique partial indexes on match transaction references prevent a second payout or duplicate per-player refund. A repeated refund request is rejected with `409`; the original per-player credits and ledger records are never repeated. An already settled winner payout is also rejected.
 
 Settlement audit fields record who finalized the match, when, what action was taken, the reason, and the transaction IDs. The Socket.IO events `match_settled`, `match_refunded`, and `match_claim_rejected` are emitted only after the database transaction commits and never include wallet balances.
 
